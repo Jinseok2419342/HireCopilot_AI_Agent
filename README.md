@@ -48,6 +48,114 @@
 
 ---
 
+## 🔗 Zapier 2차 채용 자동화 파이프라인 (Zapier Automation Workflow)
+
+이 프로젝트는 면접 결과가 Google 스프레드시트에 기록되는 것에서 끝나지 않고, **Zapier**를 통해 서류 및 기본 조건 검증부터 최종 합격/보류/탈락 처리에 이르는 **2차 채용 프로세스 자동화 파이프라인**을 매끄럽게 연결할 수 있도록 설계되어 있습니다.
+
+### 📐 전체 워크플로우 아키텍처
+
+```mermaid
+graph TD
+    A["스프레드시트 행 추가<br>(1단계 Trigger)"] --> B["이메일 유효성 확인<br>(2단계 Filter)"]
+    B --> C["학점 3점 이상 확인<br>(3단계 Filter)"]
+    C --> D["학위 필수 확인<br>(4단계 Filter)"]
+    D --> E["경력 필수 확인<br>(5단계 Filter)"]
+    E --> F{"평가 결과 COL $I 분기<br>(6단계 Paths)"}
+    
+    %% Path 1
+    F -->|채용 / 추천| Path1["경로 1: 채용 (합격) 분기"]
+    Path1 --> P1_Notion["Notion 보류 합격자 등록<br>(체크박스 포함)"]
+    P1_Notion --> P1_Cal["Google Calendar<br>'합격자 발표' 이벤트 검색"]
+    P1_Cal --> P1_Delay["Delay Until:<br>발표일까지 대기"]
+    P1_Delay --> P1_NotionFind["Notion 상태 재조회"]
+    P1_NotionFind --> P1_Check{"Notion 체크박스?"}
+    P1_Check -->|Checked ✓ 최종합격| P1_Yes["합격 축하 메일 발송<br>+ 스프레드시트 COL $A 업데이트"]
+    P1_Check -->|Unchecked ✗ 불합격| P1_No["탈락 안내 메일 발송<br>+ 스프레드시트 업데이트"]
+    
+    %% Path 2
+    F -->|보류| Path2["경로 2: 보류 분기 (상세)"]
+    Path2 --> P2_Alert["Slack DM (fjwkrtua) 및<br>이메일 검토 알림 발송"]
+    P2_Alert --> P2_Notion["Notion 보류 목록 등록<br>(체크박스 포함)"]
+    P2_Notion --> P2_JS["JavaScript: 다음날 14시 계산<br>+ Zoom 미팅 자동 생성"]
+    P2_JS --> P2_Sheets["Sheet 행 조회 (Find Row)<br>직군, AI 추천, 면접 기록 추출"]
+    P2_Sheets --> P2_Claude["Anthropic Claude AI:<br>맞춤형 추가 면접 질문 생성"]
+    P2_Claude --> P2_Doc["Google Docs 질문 삽입"]
+    P2_Doc --> P2_Cal["Google Calendar<br>'추가 합격' 이벤트 검색"]
+    P2_Cal --> P2_Delay["Delay Until:<br>대기"]
+    P2_Delay --> P2_NotionFind["Notion 상태 재조회"]
+    P2_NotionFind --> P2_Check{"Notion 체크박스?"}
+    P2_Check -->|Checked ✓ 최종합격| P2_Yes["합격 메일 발송<br>+ 스프레드시트 업데이트"]
+    P2_Check -->|Unchecked ✗ 불합격| P2_No["탈락 메일 발송<br>+ 스프레드시트 업데이트"]
+    
+    %% Path 3
+    F -->|거절 / 비추천| Path3["경로 3: 탈락 분기"]
+    Path3 --> P3_Cal["Google Calendar<br>'합격자 발표' 이벤트 검색"]
+    P3_Cal --> P3_Delay["Delay Until:<br>발표일까지 대기"]
+    P3_Delay --> P3_Email["탈락 안내 이메일 발송"]
+    P3_Email --> P3_Update["스프레드시트 COL $A<br>(최종 결과) 업데이트"]
+```
+
+---
+
+### 📝 단계별 상세 가이드
+
+#### 1️⃣ 1단계: 트리거 (Trigger) - 스프레드시트 행 추가
+- **동작 앱**: Google Sheets (New Spreadsheet Row)
+- **트리거 조건**: `HireCopilot database` 스프레드시트에 지원자의 면접 결과가 담긴 새로운 행(Row)이 추가되는 순간 Zap이 작동합니다.
+
+#### 2️⃣ 2~5단계: 순차 필터링 (Basic Screening Filter)
+네 개의 **Filter by Zapier** 단계를 순차적으로 거치며 지원자의 기본 자격을 검증합니다. 한 단계라도 필터를 충족하지 못하면 그 즉시 전체 자동화 프로세스(Zap)가 자동으로 중단(Stop)됩니다.
+- **2단계**: 지원자의 이메일 유효성 확인 (`@` 포함 및 정상 도메인 형태 여부)
+- **3단계**: 대학 학점이 **3.0 이상**인지 검증 (`COL $F` 학점 값)
+- **4단계**: 필수 학위 소지 여부 확인 (`COL $E` 학력 조건 검증)
+- **5단계**: 필수 경력 충족 여부 확인 (`COL $G` 경력 조건 검증)
+
+#### 3️⃣ 6단계: 경로 분기 (Paths by Zapier)
+기본 필터를 무사히 통과한 우수 지원자들은 스프레드시트의 **`COL $I` (평가 결과 / 채용 의견)** 값에 따라 **3가지 맞춤형 자동화 경로**로 분기되어 처리됩니다.
+
+---
+
+### 🛣️ 경로별 자동화 시나리오
+
+#### 🟢 경로 1: 채용 (합격) 분기
+> **조건**: `COL $I`에 `"채용"` (또는 AI 의견 `"추천"`)이 포함될 때 작동
+
+1. **Notion 데이터베이스 기록**: Notion의 `2026 보류 합격자 목록` 데이터베이스에 지원자 인적사항과 면접 점수를 자동으로 추가하고, 관리자 검토를 위한 **체크박스**를 생성합니다.
+2. **캘린더 연동 및 발표 대기**: Google Calendar에서 `합격자 발표` 이벤트를 자동으로 검색한 뒤, **Delay Until** 기능을 이용해 해당 이벤트의 일정(발표일)까지 전체 작동을 대기시킵니다.
+3. **관리자 최종 결정 검증**: 약속된 발표일이 되면 Notion의 해당 지원자 페이지 정보를 다시 실시간 조회(Find Page)합니다.
+4. **최종 분기 (중첩 Path)**: Notion 체크박스의 체크 여부에 따라 최종 액션이 나뉩니다.
+   - **최종 합격 (체크 ✓)**: 지원자에게 최종 합격 축하 메일을 자동으로 발송하고, 스프레드시트의 `COL $A` (최종 결과)를 "최종 합격"으로 업데이트합니다.
+   - **최종 탈락 (미체크 ✗)**: 탈락 안내 이메일을 발송하고 스프레드시트의 `COL $A`를 "최종 탈락"으로 업데이트합니다.
+
+#### 🟡 경로 2: 보류 분기 (핵심 및 최고 난이도)
+> **조건**: `COL $I`에 `"보류"`가 포함될 때 작동하며, 관리자 개입과 AI 추가 질문 생성을 결합한 매우 고도화된 연동입니다.
+
+1. **멀티 채널 검토 알림**: 
+   - 관리자 Slack 계정(`fjwkrtua`)으로 즉각적인 직메시지(DM)를 보내 우수 지원자의 검토를 알립니다.
+   - 동시에 이메일로도 상세 검토 요청 알림을 동시 전송합니다.
+2. **Notion 보류 목록 추가**: Notion의 보류 합격자 데이터베이스에 지원자를 등록하고 체크박스를 배치합니다.
+3. **Zoom 인터뷰 자동 개설 (Scripting)**: **Code by Zapier (JavaScript)**를 활용하여 실시간으로 "다음날 오후 2시"를 정확히 계산하고, Zoom API를 연동하여 가상의 2차 면접 룸(Zoom Meeting)을 자동 생성합니다.
+4. **추가 면접 컨텍스트 추출**: 스프레드시트에서 해당 지원자 행을 조회(Find Row)하여 **직군(`COL $E`)**, **1차 AI 추천 내용(`COL $S`)**, **1차 면접 전체 대화록(`COL $T`)**을 통째로 추출합니다.
+5. **Claude AI 기반 맞춤 면접 질문 생성**: 추출된 1차 면접 컨텍스트를 **Anthropic Claude AI**에 전달하여, 1차 면접 중 부족했거나 추가 검증이 필요한 항목에 대한 **"2차 면접용 맞춤형 꼬리질문"을 자동으로 생성**합니다.
+6. **문서 자동화 및 대기**: 생성된 맞춤 질문을 Google Docs 템플릿 문서의 지정 위치에 자동으로 삽입합니다. 이후 Google Calendar에서 `추가 합격` 이벤트를 검색해 해당 발표일까지 **Delay Until**로 대기합니다.
+7. **최종 분기 (중첩 Path)**: 지정된 발표일에 Notion 데이터베이스의 체크박스 상태를 재조회합니다.
+   - **보류 → 최종 합격 (체크 ✓)**: 최종 합격 이메일을 발송하고 스프레드시트를 최종 합격으로 업데이트합니다.
+   - **보류 → 최종 탈락 (미체크 ✗)**: 정중한 거절 이메일을 발송하고 스프레드시트를 최종 탈락으로 업데이트합니다.
+
+#### 🔴 경로 3: 탈락 분기
+> **조건**: `COL $I`에 `"거절"` (또는 AI 의견 `"비추천"`)이 포함될 때 작동
+
+1. **발표일 대기**: 타 지원자와의 일정을 맞추기 위해 Google Calendar에서 `합격자 발표` 이벤트를 조회하고, 해당 발표일 정시까지 **Delay Until**로 대기합니다.
+2. **탈락 처리 자동화**: 대기 시간이 종료되면 정중하게 작성된 탈락 안내 이메일을 발송하고, 스프레드시트 `COL $A`를 "최종 탈락"으로 일괄 업데이트합니다.
+
+---
+
+### 🌟 자동화 파이프라인의 설계적 가치
+- **휴먼 인 더 루프(Human-in-the-Loop)의 유연성**: AI가 1차 평가를 진행하고 2차로 다양한 서비스(Slack, Docs, Zoom)를 연동하되, **최종 결정 시점까지 대기(Delay)**한 후 Notion의 체크박스를 확인하게 설계하여 관리자의 실질적인 최종 판단 권한(인사 결정권)을 보장합니다.
+- **맞춤형 면접 고도화**: 1차 면접에 부족했던 내용을 Claude AI가 파악해 2차 면접용 맞춤 질문을 Google Docs에 준비하고 Zoom까지 자동 연결하여 채용 비용과 시간을 극적으로 아껴줍니다.
+
+---
+
 ## 📁 프로젝트 구조
 
 ```
@@ -62,63 +170,13 @@ HireCopilot_AI_Agent/
 
 ---
 
-## 🚀 처음 세팅 방법 (Windows / PowerShell)
+## 🚀 로컬 세팅 및 실행 방법
 
-### 1단계 — 가상환경 생성 및 활성화
+본 프로젝트를 로컬 Windows/PowerShell 환경에서 설정하고 실행하는 상세한 안내는 별도의 마크다운 가이드 문서로 분리하여 관리하고 있습니다. 
 
-```powershell
-cd C:\Users\pppp\Desktop\HireCopilot_AI_Agent
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
+의존성 라이브러리 설치, 환경 변수(`.env`) 지정 및 실행 포트 제어 등에 관한 구체적인 단계는 아래 문서를 참고하세요.
 
-> PowerShell이 스크립트 실행을 막을 경우 아래 명령을 한 번 실행:
-> ```powershell
-> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-> ```
-
-### 2단계 — 패키지 설치
-
-```powershell
-pip install -r requirements.txt
-```
-
-### 3단계 — 환경 변수 설정
-
-프로젝트 폴더에 `.env` 파일을 생성하고 아래 내용을 채웁니다:
-
-```env
-# OpenAI API 키. 비워두면 Dummy 모드로 실행됩니다.
-OPENAI_API_KEY=sk-...
-
-# 사용할 GPT 모델
-OPENAI_MODEL=gpt-4o-mini
-
-# Google Apps Script 웹훅 URL (스프레드시트 자동 기록)
-ZAPIER_WEBHOOK_URL=https://script.google.com/macros/s/XXXXXX/exec
-
-# 개발자 모드 활성화 암호 (비워두면 암호 없이 토글 가능)
-DEV_TOGGLE_PASSWORD=your_dev_password
-
-# 채용 담당자 페이지 접근 암호 (비워두면 암호 없이 접근 가능)
-RECRUITER_PASSWORD=your_recruiter_password
-```
-
-> ⚠️ `.env` 파일을 수정한 뒤에는 **앱을 재시작**해야 적용됩니다 (`Ctrl+C` → 다시 실행).
-
-### 4단계 — 앱 실행
-
-**지원자 면접 앱:**
-```powershell
-streamlit run app.py
-```
-→ `http://localhost:8501` 에서 접속
-
-**채용 담당자 설정 앱 (별도 실행):**
-```powershell
-streamlit run recruiter.py --server.port 8502
-```
-→ `http://localhost:8502` 에서 접속
+👉 **[SETUP.md](SETUP.md) 파일에서 로컬 세팅 가이드 확인하기**
 
 ---
 
