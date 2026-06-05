@@ -7,7 +7,7 @@
 
 ## 프로젝트 한 줄 요약
 
-지원자가 AI 면접관과 한국어로 대화하고, 면접 결과가 Google Sheets에 자동 기록되는 **Streamlit 기반 채용 자동화 에이전트** (학교 프로젝트 MVP).
+지원자가 AI 면접관과 한국어로 대화하고, 면접 결과가 Google Sheets에 기록된 뒤 **Python 파이프라인**이 2차 채용 작업을 outbox 시트에 큐잉하고, **Zapier 전용 ZAP**이 Gmail/Slack/Notion 등 앱만 연결하는 Streamlit MVP.
 
 ---
 
@@ -15,13 +15,16 @@
 
 ```
 HireCopilot_AI_Agent/
-├── app.py                  # 지원자 면접 앱 (메인, streamlit run app.py)
-├── recruiter.py            # 채용 담당자 설정 앱 (streamlit run recruiter.py --server.port 8502)
-├── recruiter_config.json   # 포지션/기준 설정 파일. 두 앱이 공유. recruiter.py에서 쓰고 app.py에서 읽음
-├── requirements.txt        # streamlit, openai, requests, python-dotenv, pydantic
-├── .env                    # 환경변수 (아래 참고)
-├── README.md               # 사용자용 세팅 안내
-└── CLAUDE.md               # 본 파일
+├── app.py                  # 지원자 면접 앱 (streamlit run app.py)
+├── pipeline.py             # 2차 파이프라인: 필터 + 분기 + outbox 큐잉
+├── gas/webhook_router.gs   # GAS 멀티 시트 웹훅 (interviews + outbox_*)
+├── recruiter.py            # 채용 담당자 설정 (port 8502)
+├── recruiter_config.json   # 포지션/기준 (두 앱 공유)
+├── tests/test_pipeline.py  # pipeline 단위 테스트
+├── requirements.txt
+├── .env
+├── README.md
+└── CLAUDE.md
 ```
 
 ---
@@ -29,181 +32,140 @@ HireCopilot_AI_Agent/
 ## 환경변수 (.env)
 
 ```env
-OPENAI_API_KEY=...          # 없으면 DUMMY 모드 (미리 준비된 질문으로 동작)
+OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4o-mini
-ZAPIER_WEBHOOK_URL=...      # Google Apps Script 웹훅 URL
-DEV_TOGGLE_PASSWORD=...     # 개발자 모드 토글 암호
-RECRUITER_PASSWORD=...      # recruiter.py 접근 암호
+GAS_WEBHOOK_URL=...           # gas/webhook_router.gs 배포 URL (권장)
+ZAPIER_WEBHOOK_URL=...          # GAS_WEBHOOK_URL 없을 때 폴백
+ADMIN_EMAIL=...                 # 보류/추천 시 관리자 알림 outbox
+ADMIN_SLACK_USER_ID=...         # Slack DM 수신 user ID
+NOTION_DATABASE_LABEL=...       # outbox_notion database 열 값
+PIPELINE_MIN_GPA=3.0            # 학점 > 3.0 통과 (3.0은 탈락)
+PIPELINE_REQUIRE_GPA=true
+PIPELINE_BLOCK_NEWGRAD=false    # true면 "신입 (경력 없음)" 탈락
+DEV_TOGGLE_PASSWORD=...
+RECRUITER_PASSWORD=...
 ```
 
-- `load_dotenv(override=True)` 사용 → `.env` 수정 후 앱 재시작 필요
-- `.env` 변경은 앱을 완전히 재시작해야 적용됨 (Streamlit 핫리로드로는 안 됨)
+- `load_dotenv(override=True)` → `.env` 수정 후 앱 **완전 재시작** 필요
 
 ---
 
 ## 핵심 아키텍처
 
+### 설계 원칙
+
+| 레이어 | 담당 | 도구 |
+|---|---|---|
+| 면접 + 평가 | Python (`app.py`) | OpenAI |
+| 저장 + outbox 큐 | Python (`pipeline.py`) → GAS | webhook_router.gs |
+| 앱 연결 | outbox 시트 New Row | **Zapier 전용 ZAP (앱당 1개)** |
+
+복잡한 monolithic Zap(필터/Paths/Delay)은 **사용하지 않음**. 로직은 코드, Zapier는 Gmail/Slack/Notion/Docs/Zoom **연결만**.
+
 ### app.py 흐름
 
 ```
-1. 온보딩 폼 (이름/이메일/학력/경력/학점/포지션 입력)
-        ↓
-2. recruiter_config.json 로드 → _build_interview_prompt() 로 시스템 프롬프트 동적 생성
-        ↓
-3. Streamlit 채팅 UI (st.chat_message / st.chat_input)
-   → llm_chat() 호출 → GPT가 한 번에 한 질문씩 진행
-   → [[INTERVIEW_COMPLETE]] 토큰 감지 시 면접 종료
-        ↓
-4. llm_json() → SYSTEM_PROMPT_EVALUATION 으로 JSON 평가 생성
-        ↓
-5. build_final_payload() → 페이로드 조립
-        ↓
-6. send_to_zapier() → Google Apps Script 웹훅으로 POST 전송
-        ↓
-7. 결과 화면 표시 + JSON 다운로드
+1. 온보딩 (이름/이메일/학력/경력/학점*/포지션)
+2. recruiter_config → _build_interview_prompt()
+3. AI 면접 채팅 → [[INTERVIEW_COMPLETE]]
+4. llm_json() 평가 → build_final_payload()
+5. execute_pipeline() → pipeline.run_pipeline()
+6. 결과 UI + JSON 다운로드
 ```
 
-### recruiter.py 흐름
+### pipeline.py 흐름
 
 ```
-암호 인증 → recruiter_config.json 로드 → 포지션 추가/수정/삭제 + 공통 기준 입력 → 저장
+1. GAS POST → interviews 탭 (A~S, 19열)
+2. check_screening() — 이메일/@, 학점>MIN_GPA, 학위, 경력
+3. hiring_opinion 분기:
+   - 추천 → outbox_notion, (admin) slack/email
+   - 보류 → slack, admin email, notion, zoom, docs(+ LLM 2차 질문)
+   - 비추천 → outbox_email (지원자 탈락 메일)
+4. pipeline_log 기록
 ```
+
+### GAS 스프레드시트 탭
+
+스프레드시트 ID: `1swaf7dyRsVRxepLJAXVoPO3YRNV0aPYmcBLL4_tPnbE`
+
+| 탭 | 용도 | Zap |
+|---|---|---|
+| `interviews` (또는 Sheet1) | 면접 DB | 불필요 |
+| `outbox_email` | to, subject, body | Gmail Send |
+| `outbox_slack` | recipient, message | Slack DM |
+| `outbox_notion` | name, database, notes | Notion Create |
+| `outbox_docs` | content | Google Docs Insert |
+| `outbox_zoom` | topic, start_time, duration | Zoom Create Meeting |
+| `pipeline_log` | 로그 | 불필요 |
+
+POST 형식: `{ "target": "outbox_email", "row": [...] }`
 
 ---
 
-## 주요 함수 & 상수
+## 주요 함수
 
 | 이름 | 파일 | 설명 |
 |---|---|---|
-| `_build_interview_prompt()` | app.py | recruiter_config + 지원 포지션 반영한 시스템 프롬프트 생성 |
-| `llm_chat()` | app.py | GPT 채팅 호출. DUMMY_MODE면 미리 준비된 질문 반환 |
-| `llm_json()` | app.py | GPT JSON 모드 호출. DUMMY_MODE면 더미 평가 반환 |
-| `build_final_payload()` | app.py | 평가 결과 + 지원자 정보 합쳐 최종 dict 조립 |
-| `send_to_zapier()` | app.py | POST 후 302 리다이렉트 → GET으로 처리 (GAS 특성) |
-| `load_recruiter_config()` | app.py, recruiter.py | JSON 로드. 파일 없으면 DEFAULT_POSITIONS로 자동 생성 |
-| `save_recruiter_config()` | recruiter.py | JSON 저장 (updated_at 자동 갱신) |
-| `RUBRIC` | app.py | 5개 평가 항목 정의 (culture_fit 등) |
-| `DEFAULT_POSITIONS` | app.py, recruiter.py | recruiter_config.json 초기값 |
-| `RECRUITER_CONFIG_PATH` | app.py, recruiter.py | 두 파일 모두 동일한 절대 경로 사용 |
+| `execute_pipeline()` | app.py | pipeline.run_pipeline 래퍼 + DUMMY llm_fn |
+| `run_pipeline()` | pipeline.py | 저장 + 필터 + outbox dispatch |
+| `retry_failed_outbox()` | pipeline.py | 실패 outbox만 재전송 (interviews 중복 방지) |
+| `post_to_gas()` | pipeline.py | GAS POST + 302→GET 처리 |
+| `check_screening()` | pipeline.py | 자격 필터 |
+| `build_branch_actions()` | pipeline.py | 추천/보류/비추천 outbox 행 생성 |
+| `llm_chat()` / `llm_json()` | app.py | OpenAI 호출 |
+| `build_final_payload()` | app.py | 최종 평가 dict (concerns 포함) |
 
 ---
 
-## 평가 JSON 스키마 (build_final_payload 출력)
-
-```json
-{
-  "project_notice": "...",
-  "candidate_name": "홍길동",
-  "candidate_email": "hong@example.com",
-  "position": "개발자",
-  "degree": "학사 (4년제)",
-  "gpa": "4.2",
-  "experience": "1~3년",
-  "timestamp": "2026-05-07T10:00:00+00:00",
-  "scores": {
-    "culture_fit": 4,
-    "customer_response": 4,
-    "ownership": 5,
-    "communication": 3,
-    "learning_agility": 4,
-    "overall": 4.0
-  },
-  "fit_level": "possible_match",
-  "hiring_opinion": "보류",
-  "hiring_recommendation_reason": "...",
-  "summary": "...",
-  "strengths": ["..."],
-  "concerns": ["..."],
-  "evidence_quotes": ["..."],
-  "recommended_next_step": "...",
-  "transcript": "면접관: ...\n지원자: ..."
-}
-```
-
-- `fit_level`: `strong_match` / `possible_match` / `needs_human_review` / `weak_match`
-- `hiring_opinion`: `추천` / `보류` / `비추천`
-
----
-
-## Google Apps Script 연동
-
-- `.env`의 `ZAPIER_WEBHOOK_URL`은 실제로 Google Apps Script 웹훅 URL
-- GAS는 POST 수신 후 302 리다이렉트를 반환 → `send_to_zapier()`는 1차 POST 후 리다이렉트를 **GET**으로 처리 (POST로 재전송하면 405 발생)
-- GAS `doPost()`가 스프레드시트에 기록하는 컬럼 순서 (19개):
+## interviews 컬럼 (A~S)
 
 ```
 타임스탬프 | 이름 | 이메일 | 포지션 | 학력 | 학점 | 경력 |
-적합도 | 채용의견 | 추천이유 | 총점 | 문화적합도 | 고객응대 |
-주인의식 | 커뮤니케이션 | 학습민첩성 | 요약 | 다음단계 | 전체대화
+적합도 | 채용의견(I=추천/보류/비추천) | 추천이유 | 총점 | 5개 항목점수 |
+요약 | 다음단계 | 전체대화
 ```
-
-- GAS 코드 변경 시 반드시 **새 배포** 생성 후 `.env`의 URL 업데이트 필요
 
 ---
 
-## Streamlit 세션 상태 키 목록
+## Streamlit 세션 상태
 
 | 키 | 설명 |
 |---|---|
-| `onboarding_done` | 온보딩 폼 완료 여부 |
-| `candidate_name` / `candidate_email` / `position` / `degree` / `gpa` / `experience` | 온보딩에서 수집한 지원자 정보 |
-| `messages` | 전체 대화 기록 (system 포함) |
-| `greeted` | 첫 인사 메시지 전송 여부 |
-| `interview_done` | `[[INTERVIEW_COMPLETE]]` 감지 여부 |
-| `final_payload` | 최종 평가 dict (생성 후 저장) |
-| `zapier_status` | `(bool, str)` 전송 결과 |
-| `dev_mode` | 개발자 모드 활성화 여부 |
-| `dev_mode_pending` | 개발자 모드 암호 입력 대기 중 |
-| `running_eval` | 개발자 모드 실시간 평가 dict |
+| `pipeline_result` | `PipelineResult` (저장/outbox 결과) |
+| `final_payload` | 최종 평가 dict |
+| `interview_done` | 면접 종료 여부 |
+| (기타) | onboarding, messages, dev_mode, running_eval |
 
 ---
 
-## 알려진 동작 특이사항 / 주의점
+## 알려진 주의점
 
-1. **`load_dotenv(override=True)`**: OS 환경변수보다 `.env` 값 우선. `.env` 수정 후 반드시 앱 재시작.
-2. **GAS 리다이렉트**: POST → 302 → GET 순서로 처리. POST를 두 번 보내면 405 오류.
-3. **`messages` 초기화 시점**: 온보딩 완료 후, 포지션이 확정된 시점에 `_build_interview_prompt()`로 생성. 면접 중간에 포지션 변경 불가.
-4. **`recruiter_config.json`**: 두 앱이 같은 파일 경로(`os.path.abspath(__file__)` 기준)를 공유. 파일이 없으면 `DEFAULT_POSITIONS`로 자동 생성.
-5. **DUMMY_MODE**: `OPENAI_API_KEY`가 비어있으면 자동 활성화. 미리 준비된 7개 질문 순서대로 출력.
-6. **개발자 모드**: 암호 인증 후 활성화. 좌우 분할 레이아웃(3:2)으로 실시간 채점 패널 표시.
-7. **면접 강제 종료**: `MAX_ANSWERS`(8개) 도달 시 모델이 `[[INTERVIEW_COMPLETE]]`를 안 붙여도 강제 추가.
+1. **GAS 302**: POST 후 Location GET으로 응답 확인 (`post_to_gas`)
+2. **재전송**: `skip_interview_save=True`로 outbox만 재전송. "전체 재실행"은 interviews 행 중복
+3. **학점 필수**: 온보딩 + `PIPELINE_REQUIRE_GPA=true` — 3.0 초과 필요 (`>3.0`, 3.0은 탈락)
+4. **GAS 배포 변경** 시 URL 갱신 + 앱 재시작
+5. **Delay/Notion HITL** (구 monolithic Zap 기능)은 미구현 — 필요 시 outbox_scheduled 확장
 
 ---
 
-## LLM 교체 방법
+## 테스트
 
-`app.py`의 `llm_chat()`과 `llm_json()` 두 함수만 수정하면 됩니다. 나머지 로직 변경 불필요.
-
-```python
-# Anthropic 교체 예시
-import anthropic
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-def llm_chat(messages, temperature=0.4):
-    resp = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1024,
-        messages=[m for m in messages if m["role"] != "system"],
-        system=next((m["content"] for m in messages if m["role"] == "system"), ""),
-    )
-    return resp.content[0].text
+```powershell
+python -m unittest tests/test_pipeline.py
 ```
 
 ---
 
-## 현재 작업 현황 (2026-05-07 기준)
+## 현재 작업 현황
 
-- [x] 온보딩 폼 (이름/이메일/학력/경력/학점/포지션)
-- [x] 채용 담당자 설정 페이지 (`recruiter.py`) — 포지션/기준 관리, 암호 보호
-- [x] AI 면접 (포지션별 기준 동적 반영)
-- [x] 5개 루브릭 자동 채점 + 채용 의견(추천/보류/비추천) 생성
-- [x] Google Apps Script → 스프레드시트 19컬럼 자동 기록
-- [x] 개발자 모드 (실시간 채점 패널, 암호 보호)
-- [x] `recruiter_config.json` 공유 파일로 두 앱 연동
-- [x] GAS 302 리다이렉트 → GET 처리 (405 오류 수정)
+- [x] AI 면접 + 5루브릭 + hiring_opinion
+- [x] GAS 멀티 시트 webhook_router
+- [x] pipeline.py (코드 중심 2차 파이프라인)
+- [x] outbox 패턴 (Zapier = 앱 연결 전용)
+- [x] 보류 시 LLM 2차 질문 + zoom outbox
 
-### 잠재적 개선 포인트 (아직 미구현)
-- 면접 결과 히스토리 페이지 (스프레드시트 데이터 조회)
-- 이메일 자동 발송 (GAS 또는 외부 서비스 연동)
-- 다국어 지원
-- 면접관 페르소나 커스터마이징 옵션
+### 미구현 / 확장 후보
+- Delay Until + Notion 체크박스 최종 합격 (outbox_scheduled)
+- 면접 결과 히스토리 UI
+- Zoom/Calendar를 코드에서 직접 호출 (현재 outbox→Zap)

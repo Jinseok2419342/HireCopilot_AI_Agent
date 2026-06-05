@@ -1,21 +1,28 @@
 """
 HireCopilot - AI 채용 인터뷰 챗봇 (학교 프로젝트 MVP)
 
-지원자가 AI 면접관과 대화하는 간단한 Streamlit 앱입니다.
-면접이 끝나면 구조화된 JSON 평가가 생성되어 Zapier Catch Hook
-웹훅으로 전송됩니다.
+지원자가 AI 면접관과 대화하는 Streamlit 앱입니다.
+면접 종료 후 평가 JSON을 생성하고 pipeline.py가 GAS 웹훅으로
+interviews 시트 저장 + outbox 시트 큐잉을 수행합니다.
+(Zapier는 outbox 시트 New Row → Gmail/Slack 등 앱 연결 전용)
 
-본 앱은 학교 수업용 프로토타입 입니다.
-AI의 출력은 사람의 검토를 돕기 위한 참고 자료일 뿐입니다.
+본 앱은 학교 수업용 프로토타입입니다.
+AI 출력은 사람 검토를 돕기 위한 참고 자료일 뿐입니다.
 """
 
 import json
 import os
 from datetime import datetime, timezone
 
-import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+from pipeline import (
+    PipelineResult,
+    load_pipeline_config,
+    retry_failed_outbox,
+    run_pipeline,
+)
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -25,7 +32,6 @@ load_dotenv(override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-ZAPIER_WEBHOOK_URL = os.getenv("ZAPIER_WEBHOOK_URL", "").strip()
 DEV_TOGGLE_PASSWORD = os.getenv("DEV_TOGGLE_PASSWORD", "").strip()
 
 # If no API key is set, run in DUMMY mode so the UI still works in class.
@@ -342,7 +348,7 @@ def build_final_payload(
     experience: str,
     transcript: str,
 ) -> dict:
-    """Validate, clean up, and assemble the final JSON to send to Zapier."""
+    """평가 결과 + 지원자 정보를 최종 dict로 조립 (pipeline / GAS 전송용)."""
     scores = raw_eval.get("scores", {}) or {}
 
     def clamp(v) -> int:
@@ -388,30 +394,33 @@ def build_final_payload(
     }
 
 
-def send_to_zapier(payload: dict) -> tuple[bool, str]:
-    """JSON 페이로드를 웹훅으로 POST 전송.
+def _llm_text(prompt: str) -> str:
+    """파이프라인용 단발 LLM 호출 (2차 면접 질문 생성 등)."""
+    return llm_chat([{"role": "user", "content": prompt}], temperature=0.3)
 
-    Google Apps Script는 POST 요청에 302 리다이렉트를 반환합니다.
-    doPost는 최초 POST에서 이미 실행되며, 리다이렉트 URL은 응답을
-    가져오기 위한 GET 요청으로 처리해야 합니다.
-    """
-    if not ZAPIER_WEBHOOK_URL:
-        return False, "환경 변수 ZAPIER_WEBHOOK_URL 이(가) 설정되지 않았습니다."
-    try:
-        # 1차 POST: doPost 실행 트리거 (리다이렉트 자동 추적 안 함)
-        r = requests.post(ZAPIER_WEBHOOK_URL, json=payload, timeout=10, allow_redirects=False)
 
-        # Google Apps Script: 302 리다이렉트 → 응답 본문은 GET으로 가져옴
-        if r.status_code in (301, 302, 303, 307, 308):
-            redirect_url = r.headers.get("Location")
-            if redirect_url:
-                r = requests.get(redirect_url, timeout=10, allow_redirects=True)
+def execute_pipeline(payload: dict) -> PipelineResult:
+    """면접 결과 저장 + outbox 큐잉 (Zapier는 outbox 시트 New Row로 앱 연결)."""
+    cfg = load_pipeline_config()
 
-        if 200 <= r.status_code < 300:
-            return True, f"전송 성공 (HTTP {r.status_code})."
-        return False, f"웹훅 응답 오류 HTTP {r.status_code}: {r.text[:300]}"
-    except requests.RequestException as e:
-        return False, f"네트워크 오류로 전송 실패: {e}"
+    if DUMMY_MODE:
+        def llm_fn(_prompt: str) -> str:
+            return (
+                "1. [데모] 고객 불만 상황에서 본인의 역할을 STAR 형식으로 설명해 주세요.\n"
+                "2. [데모] 팀 내 갈등을 조율했던 경험이 있다면 말씀해 주세요.\n"
+                "3. [데모] 새로운 업무를 빠르게 학습했던 사례를 알려 주세요."
+            )
+    else:
+        llm_fn = _llm_text
+
+    return run_pipeline(
+        payload,
+        cfg["webhook_url"],
+        admin_email=cfg["admin_email"],
+        admin_slack=cfg["admin_slack"],
+        notion_database=cfg["notion_database"],
+        llm_fn=llm_fn,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +495,7 @@ def _init_state():
     # messages는 온보딩 완료 후 포지션 확정 시점에 초기화 (아래 온보딩 블록 이후 참고)
     st.session_state.setdefault("interview_done", False)
     st.session_state.setdefault("final_payload", None)
-    st.session_state.setdefault("zapier_status", None)
+    st.session_state.setdefault("pipeline_result", None)
     st.session_state.setdefault("greeted", False)
     st.session_state.setdefault("onboarding_done", False)
     st.session_state.setdefault("dev_mode", False)
@@ -508,7 +517,7 @@ if not st.session_state.onboarding_done:
             ob_email = st.text_input("이메일 *", placeholder="example@email.com")
             ob_degree = st.selectbox("최종 학력 *", options=DEGREE_OPTIONS)
             ob_experience = st.selectbox("경력 *", options=EXPERIENCE_OPTIONS)
-            ob_gpa = st.text_input("학점 (선택)", placeholder="예: 4.2 / 4.5")
+            ob_gpa = st.text_input("학점 *", placeholder="예: 4.2 / 4.5")
             # 채용 담당자가 등록한 포지션 우선 표시, 없으면 기본 POSITIONS 사용
             _ob_rcfg = load_recruiter_config()
             _ob_positions = [p["name"] for p in _ob_rcfg.get("positions", [])]
@@ -520,6 +529,8 @@ if not st.session_state.onboarding_done:
                     errors.append("이름을 입력해 주세요.")
                 if not ob_email.strip() or "@" not in ob_email:
                     errors.append("유효한 이메일 주소를 입력해 주세요.")
+                if not ob_gpa.strip():
+                    errors.append("학점을 입력해 주세요 (2차 파이프라인 자격 필터에 사용됩니다).")
                 if errors:
                     for err in errors:
                         st.error(err)
@@ -607,7 +618,7 @@ with st.sidebar:
         st.caption("시스템 정보")
         st.write(f"모델: `{OPENAI_MODEL}`")
         st.write(f"실행 모드: {'데모(Dummy)' if DUMMY_MODE else 'OpenAI'}")
-        st.write(f"Webhook 설정 여부: {'설정됨' if ZAPIER_WEBHOOK_URL else '미설정'}")
+        st.write(f"GAS Webhook: {'설정됨' if load_pipeline_config()['webhook_url'] else '미설정'}")
 
 
 # --- 첫 인사 메시지 ---
@@ -929,9 +940,42 @@ if st.session_state.interview_done and st.session_state.final_payload is None:
     )
     st.session_state.final_payload = payload
 
-    ok, msg = send_to_zapier(payload)
-    st.session_state.zapier_status = (ok, msg)
+    st.session_state.pipeline_result = execute_pipeline(payload)
     st.rerun()
+
+
+def _render_pipeline_status(result: PipelineResult) -> None:
+    cfg = load_pipeline_config()
+    if not cfg["webhook_url"]:
+        st.warning("GAS_WEBHOOK_URL(또는 ZAPIER_WEBHOOK_URL)이 설정되지 않았습니다. 시트 저장/outbox가 동작하지 않습니다.")
+
+    ok, msg = result.interview_saved
+    if ok:
+        st.success(f"✅ 면접 결과 시트 저장: {msg}")
+    else:
+        st.warning(f"⚠️ 면접 결과 저장 실패: {msg}")
+
+    if not result.screening_passed:
+        st.info(f"📋 자격 필터 미통과 — outbox 액션 생략 ({result.screening_reason})")
+        log_rows = [(t, ok, m) for t, ok, m in result.action_results if t == "pipeline_log"]
+        if log_rows:
+            _, log_ok, log_msg = log_rows[0]
+            st.caption(f"pipeline_log: {'✅' if log_ok else '⚠️'} {log_msg}")
+        return
+
+    outbox_count = sum(1 for a in result.actions if a.target != "pipeline_log")
+    st.caption(f"분기: **{result.branch}** | outbox 액션 {outbox_count}건")
+
+    for target, ok, msg in result.action_results:
+        if target == "pipeline_log":
+            continue
+        icon = "✅" if ok else "⚠️"
+        st.write(f"{icon} `{target}` — {msg}")
+
+    if result.has_outbox_actions and not result.outbox_actions_ok:
+        if st.button("실패한 outbox 재전송", key="retry_outbox"):
+            st.session_state.pipeline_result = retry_failed_outbox(result)
+            st.rerun()
 
 
 # --- 결과 표시 ---
@@ -939,15 +983,21 @@ if st.session_state.final_payload is not None:
     st.subheader("최종 평가 결과")
     st.caption(PROJECT_NOTICE)
 
-    ok, msg = st.session_state.zapier_status or (False, "전송되지 않았습니다.")
-    if ok:
-        st.success(f"✅ {msg}")
+    if st.session_state.pipeline_result:
+        _render_pipeline_status(st.session_state.pipeline_result)
     else:
-        st.warning(f"⚠️ Webhook 전송 실패: {msg}")
-        if st.button("Zapier로 재전송"):
-            ok, msg = send_to_zapier(st.session_state.final_payload)
-            st.session_state.zapier_status = (ok, msg)
-            st.rerun()
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("outbox만 재전송", help="interviews 행 중복 없이 outbox만 다시 전송"):
+                st.session_state.pipeline_result = run_pipeline(
+                    st.session_state.final_payload,
+                    skip_interview_save=True,
+                )
+                st.rerun()
+        with col_b:
+            if st.button("전체 재실행", help="interviews 행 + outbox 모두 다시 기록 (행 중복 주의)"):
+                st.session_state.pipeline_result = execute_pipeline(st.session_state.final_payload)
+                st.rerun()
 
     st.write("**디버그용 JSON 페이로드**")
     st.json(st.session_state.final_payload)
