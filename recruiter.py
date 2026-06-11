@@ -33,6 +33,44 @@ DEFAULT_POSITIONS = [
     {"name": "Operations Coordinator (운영 조정관)", "criteria": ""},
 ]
 
+ZAPIER_GUIDE_ROWS = [
+    {
+        "outbox 탭": "outbox_email",
+        "코드가 추가하는 행": "timestamp | to | subject | body | from_name",
+        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
+        "Zapier Action": "Gmail - Send Email",
+        "주요 매핑": "To=to, Subject=subject, Body=body",
+    },
+    {
+        "outbox 탭": "outbox_slack",
+        "코드가 추가하는 행": "timestamp | recipient | message",
+        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
+        "Zapier Action": "Slack - Send Direct Message",
+        "주요 매핑": "User=recipient, Message=message",
+    },
+    {
+        "outbox 탭": "outbox_notion",
+        "코드가 추가하는 행": "timestamp | name | database | notes",
+        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
+        "Zapier Action": "Notion - Create Database Item",
+        "주요 매핑": "Name=name, Notes=notes",
+    },
+    {
+        "outbox 탭": "outbox_docs",
+        "코드가 추가하는 행": "timestamp | candidate_name | candidate_email | content",
+        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
+        "Zapier Action": "Google Docs - Append Text",
+        "주요 매핑": "Document은 Zap에서 고정, Text=content",
+    },
+    {
+        "outbox 탭": "outbox_zoom",
+        "코드가 추가하는 행": "timestamp | topic | start_time_iso | duration_min | candidate_name",
+        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
+        "Zapier Action": "Zoom - Create Meeting",
+        "주요 매핑": "Topic=topic, Start=start_time_iso, Duration=duration_min",
+    },
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -190,7 +228,7 @@ def render_outbox(records: list[dict]) -> None:
         return
 
     failed_records = [record for record in records if failed_outbox_count(record) > 0]
-    st.caption("실패 outbox 재전송은 interviews 행을 다시 저장하지 않고, 실패한 outbox/pipeline_log 요청만 다시 보냅니다.")
+    st.caption("실패 outbox 재전송은 interviews 행을 다시 저장하지 않고, 실패한 outbox 요청만 다시 보냅니다.")
 
     selected = st.selectbox(
         "outbox 상태를 확인할 지원자",
@@ -234,6 +272,57 @@ def render_outbox(records: list[dict]) -> None:
         update_pipeline_result(retry_target["record_id"], updated)
         st.success("재전송을 시도했습니다. 최신 결과로 새로고침합니다.")
         st.rerun()
+
+
+def render_zapier_guide() -> None:
+    st.subheader("Zapier 연결 가이드")
+    st.caption("코드는 outbox 시트에 해야 할 일을 기록하고, Zapier는 앱 연결만 담당합니다.")
+
+    st.markdown(
+        """
+**핵심 원칙**
+
+1. `pipeline.py`가 필터, 분기, 2차 질문 생성 같은 판단 로직을 처리합니다.
+2. `gas/webhook_router.gs`가 `interviews`와 `outbox_*` 탭에 행을 추가합니다.
+3. Zapier는 각 `outbox_*` 탭의 새 행을 트리거로 받아 Gmail, Slack, Notion, Docs, Zoom에 연결합니다.
+4. 구 30단계 Zap처럼 Filter, Paths, Delay, AI 호출을 한 Zap 안에 넣지 않습니다.
+"""
+    )
+
+    st.dataframe(ZAPIER_GUIDE_ROWS, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("**예시: Gmail 발송 흐름**")
+    st.code(
+        "pipeline.py -> outbox_email 행 추가\n"
+        "GAS -> Google Sheets outbox_email appendRow\n"
+        "Zapier -> New Row 트리거\n"
+        "Gmail -> to/subject/body 값을 매핑해 메일 발송",
+        language="text",
+    )
+
+    st.markdown("**분기별로 생성되는 주요 outbox**")
+    st.dataframe(
+        [
+            {
+                "채용 의견": "추천",
+                "생성 outbox": "outbox_notion, outbox_slack, outbox_email(관리자 알림)",
+                "의도": "관리자가 좋은 후보를 확인하고 후속 검토",
+            },
+            {
+                "채용 의견": "보류",
+                "생성 outbox": "outbox_slack, outbox_email, outbox_notion, outbox_zoom, outbox_docs",
+                "의도": "추가 면접 준비와 관리자 검토",
+            },
+            {
+                "채용 의견": "비추천",
+                "생성 outbox": "outbox_email",
+                "의도": "지원자에게 결과 안내 메일 발송",
+            },
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def render_recruiting_settings(config: dict) -> None:
@@ -347,8 +436,8 @@ with st.sidebar:
         st.session_state.pop("recruiter_positions", None)
         st.rerun()
 
-tab_dashboard, tab_interviews, tab_outbox, tab_settings = st.tabs(
-    ["대시보드", "지원자/면접 결과", "outbox/파이프라인", "채용 담당 설정"]
+tab_dashboard, tab_interviews, tab_outbox, tab_zapier, tab_settings = st.tabs(
+    ["대시보드", "지원자/면접 결과", "outbox/파이프라인", "Zapier 연결 가이드", "채용 담당 설정"]
 )
 
 with tab_dashboard:
@@ -359,6 +448,9 @@ with tab_interviews:
 
 with tab_outbox:
     render_outbox(records)
+
+with tab_zapier:
+    render_zapier_guide()
 
 with tab_settings:
     render_recruiting_settings(config)
