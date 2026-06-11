@@ -9,17 +9,25 @@
 
 outbox 시트 스키마 (GAS가 탭 없으면 헤더와 함께 자동 생성):
 
-  interviews:     A~S 면접 DB (19열, 아래 interview_row 참고)
-  outbox_email:   timestamp | to | subject | body | from_name
-  outbox_slack:   timestamp | recipient | message
-  outbox_notion:  timestamp | name | database | notes
-  outbox_docs:    timestamp | candidate_name | candidate_email | content
-  outbox_zoom:    timestamp | topic | start_time_iso | duration_min | candidate_name
-  pipeline_log:   timestamp | candidate_name | branch | screening | detail
+  interviews:       A~S 면접 DB (19열, 아래 interview_row 참고)
+  outbox_email:     timestamp | to | subject | body | from_name
+  outbox_slack:     timestamp | recipient | message
+  outbox_notion:    timestamp | name | database | notes
+  outbox_docs:      timestamp | candidate_name | candidate_email | content
+  outbox_zoom:      timestamp | topic | start_time_iso | duration_min | candidate_name
+  outbox_scheduled: timestamp | send_after_iso | to | subject | body | candidate_name
+  pipeline_log:     timestamp | candidate_name | branch | screening | detail
+
+outbox_scheduled (HITL 최종 합격):
+  추천 분기에서 최종 합격 안내 메일을 예약 큐에 넣는다. 전용 Zap이
+  New Row → Delay Until(send_after_iso) → Notion에서 후보 검색 →
+  관리자가 체크박스를 켠 경우에만 → Gmail 발송 순으로 처리한다.
+  즉 사람(관리자)의 Notion 체크가 최종 발송 게이트다.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -30,6 +38,10 @@ from zoneinfo import ZoneInfo
 import requests
 
 KST = ZoneInfo("Asia/Seoul")
+
+RECRUITER_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "recruiter_config.json"
+)
 
 FOLLOWUP_PROMPT = """당신은 채용 담당자를 돕는 HR 어시스턴트입니다.
 아래 1차 AI 면접 정보를 바탕으로 2차 면접에서 사용할 맞춤형 질문 5~7개를 작성하세요.
@@ -76,18 +88,51 @@ class PipelineResult:
         return any(a.target != "pipeline_log" for a in self.actions)
 
 
-def load_pipeline_config() -> dict:
+def _load_recruiter_filter_overrides(path: str) -> dict:
+    """recruiter_config.json의 "pipeline" 섹션(관리자 콘솔에서 저장)을 읽는다."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    overrides = data.get("pipeline")
+    return overrides if isinstance(overrides, dict) else {}
+
+
+def load_pipeline_config(config_path: str | None = None) -> dict:
+    """파이프라인 설정 로드.
+
+    자격 필터(min_gpa / require_gpa / block_newgrad)는
+    관리자 콘솔이 저장하는 recruiter_config.json "pipeline" 섹션이
+    .env 값보다 우선한다.
+    """
     min_gpa = os.getenv("PIPELINE_MIN_GPA", "3.0").strip()
     try:
         min_gpa_f = float(min_gpa)
     except ValueError:
         min_gpa_f = 3.0
 
+    require_gpa = os.getenv("PIPELINE_REQUIRE_GPA", "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
     block_newgrad = os.getenv("PIPELINE_BLOCK_NEWGRAD", "false").strip().lower() in (
         "1",
         "true",
         "yes",
     )
+
+    overrides = _load_recruiter_filter_overrides(config_path or RECRUITER_CONFIG_PATH)
+    if "min_gpa" in overrides:
+        try:
+            min_gpa_f = float(overrides["min_gpa"])
+        except (TypeError, ValueError):
+            pass
+    if "require_gpa" in overrides:
+        require_gpa = bool(overrides["require_gpa"])
+    if "block_newgrad" in overrides:
+        block_newgrad = bool(overrides["block_newgrad"])
 
     return {
         "webhook_url": (
@@ -98,8 +143,7 @@ def load_pipeline_config() -> dict:
         "admin_slack": os.getenv("ADMIN_SLACK_USER_ID", "").strip(),
         "notion_database": os.getenv("NOTION_DATABASE_LABEL", "2026 보류 합격자 목록").strip(),
         "min_gpa": min_gpa_f,
-        "require_gpa": os.getenv("PIPELINE_REQUIRE_GPA", "true").strip().lower()
-        not in ("0", "false", "no"),
+        "require_gpa": require_gpa,
         "block_newgrad": block_newgrad,
     }
 
@@ -223,8 +267,28 @@ def _zoom_action(topic: str, start_iso: str, duration_min: int, candidate_name: 
     )
 
 
+def _scheduled_email_action(
+    send_after_iso: str,
+    to: str,
+    subject: str,
+    body: str,
+    candidate_name: str,
+) -> OutboxAction:
+    return OutboxAction(
+        "outbox_scheduled",
+        [_now_iso(), send_after_iso, to, subject, body, candidate_name],
+    )
+
+
 def _log_action(name: str, branch: str, screening: str, detail: str) -> OutboxAction:
     return OutboxAction("pipeline_log", [_now_iso(), name, branch, screening, detail])
+
+
+def _acceptance_email_html(name: str, position: str) -> str:
+    return f"""<p>안녕하세요, {name}님.</p>
+<p>{position} 포지션 채용 전형 결과, <strong>최종 합격</strong>하셨음을 안내드립니다. 축하드립니다!</p>
+<p>입사 절차와 일정은 곧 별도 메일로 안내드리겠습니다.</p>
+<p>감사합니다.<br>채용팀 드림</p>"""
 
 
 def _reject_email_html(name: str) -> str:
@@ -266,12 +330,25 @@ def build_branch_actions(
 
     if opinion == "추천":
         actions.append(_notion_action(name, notion_database, notes))
+        # HITL 최종 합격: 다음날 오후 2시(KST)까지 관리자가 Notion 체크박스를
+        # 켜 두면 전용 Zap이 합격 메일을 발송한다 (체크 안 하면 미발송).
+        if email:
+            actions.append(
+                _scheduled_email_action(
+                    _next_day_2pm_kst_iso(),
+                    email,
+                    f"{name}님, 최종 합격을 축하드립니다!",
+                    _acceptance_email_html(name, position),
+                    name,
+                )
+            )
         if admin_slack:
             actions.append(
                 _slack_action(
                     admin_slack,
                     f"✅ *추천 지원자* — {name} ({email}) / {position}\n"
-                    "Notion에서 최종 검토 후 체크해 주세요.",
+                    "내일 오후 2시 전까지 Notion에서 최종 검토 후 승인 체크박스를 켜 주세요.\n"
+                    "체크된 경우에만 최종 합격 메일이 자동 발송됩니다.",
                 )
             )
         if admin_email:

@@ -71,6 +71,39 @@ class TestAdminStore(unittest.TestCase):
         self.assertEqual(failed_outbox_count(records[0]), 0)
         self.assertEqual(summarize_records(records)["hold"], 1)
 
+    def test_update_unknown_record_id_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            save_interview_record(_payload(), _result(), path=path)
+            updated = update_pipeline_result("없는아이디", _result(ok=True), path=path)
+        self.assertIsNone(updated)
+
+    def test_save_with_none_result_keeps_record(self):
+        # 파이프라인이 실패해도(결과 None) 면접 스냅샷 자체는 저장되어야 한다.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            record = save_interview_record(_payload(), None, path=path)
+            records = list_interview_records(path=path)
+        self.assertIsNone(record["pipeline_result"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(failed_outbox_count(records[0]), 0)
+
+    def test_list_orders_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            save_interview_record(
+                _payload(timestamp="2026-01-01T00:00:00+00:00", candidate_email="a@b.c"),
+                _result(),
+                path=path,
+            )
+            save_interview_record(
+                _payload(timestamp="2026-02-01T00:00:00+00:00", candidate_email="x@y.z"),
+                _result(),
+                path=path,
+            )
+            records = list_interview_records(path=path)
+        self.assertEqual(records[0]["payload"]["candidate_email"], "x@y.z")
+
 
 if __name__ == "__main__":
     unittest.main()

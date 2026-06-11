@@ -41,14 +41,17 @@ ZAPIER_WEBHOOK_URL=...          # GAS_WEBHOOK_URL 없을 때 폴백
 ADMIN_EMAIL=...                 # 보류/추천 시 관리자 알림 outbox
 ADMIN_SLACK_USER_ID=...         # Slack DM 수신 user ID
 NOTION_DATABASE_LABEL=...       # outbox_notion database 열 값
-PIPELINE_MIN_GPA=3.0            # 학점 > 3.0 통과 (3.0은 탈락)
-PIPELINE_REQUIRE_GPA=true
-PIPELINE_BLOCK_NEWGRAD=false    # true면 "신입 (경력 없음)" 탈락
+PIPELINE_MIN_GPA=3.0            # 학점 > 3.0 통과 (3.0은 탈락) — 기본값
+PIPELINE_REQUIRE_GPA=true       # 기본값
+PIPELINE_BLOCK_NEWGRAD=false    # true면 "신입 (경력 없음)" 탈락 — 기본값
 DEV_TOGGLE_PASSWORD=...
 RECRUITER_PASSWORD=...
 ```
 
 - `load_dotenv(override=True)` → `.env` 수정 후 앱 **완전 재시작** 필요
+- **자격 필터 우선순위**: 관리자 콘솔(채용 담당 설정 탭)에서 저장하는
+  `recruiter_config.json`의 `"pipeline"` 섹션이 `.env`의 PIPELINE_* 값보다 **우선**한다
+  (`pipeline.load_pipeline_config()`가 병합). 콘솔 저장은 재시작 없이 다음 면접부터 반영.
 
 ---
 
@@ -83,7 +86,7 @@ RECRUITER_PASSWORD=...
 1. GAS POST → interviews 탭 (A~S, 19열)
 2. check_screening() — 이메일/@, 학점>MIN_GPA, 학위, 경력
 3. hiring_opinion 분기:
-   - 추천 → outbox_notion, (admin) slack/email
+   - 추천 → outbox_notion, outbox_scheduled(최종 합격 메일 예약, HITL), (admin) slack/email
    - 보류 → slack, admin email, notion, zoom, docs(+ LLM 2차 질문)
    - 비추천 → outbox_email (지원자 탈락 메일)
 4. pipeline_log 기록
@@ -114,6 +117,7 @@ RECRUITER_PASSWORD=...
 | `outbox_notion` | name, database, notes | Notion Create |
 | `outbox_docs` | content | Google Docs Insert |
 | `outbox_zoom` | topic, start_time, duration | Zoom Create Meeting |
+| `outbox_scheduled` | send_after_iso, to, subject, body, candidate_name | Delay Until → Notion 체크 확인 → Gmail |
 | `pipeline_log` | 로그 | 불필요 |
 
 POST 형식: `{ "target": "outbox_email", "row": [...] }`
@@ -170,8 +174,11 @@ POST 형식: `{ "target": "outbox_email", "row": [...] }`
 | Notion | `outbox_notion` | Notion Create DB Item | name, notes |
 | Docs | `outbox_docs` | Google Docs Append Text | content |
 | Zoom | `outbox_zoom` | Zoom Create Meeting | topic, start_time_iso, duration_min |
+| Scheduled | `outbox_scheduled` | Delay Until → Notion Find Item → Gmail | send_after_iso, candidate_name, to, subject, body |
 
 예: Gmail 발송은 `pipeline.py`가 `outbox_email` 행을 만들고, GAS가 그 행을 시트에 추가하면, 전용 Zap이 새 행을 감지해 Gmail 액션으로 보낸다. Zap 안에는 Filter/Paths/AI 호출을 넣지 않는다.
+
+예외: `outbox_scheduled` Zap만 Delay Until + Notion 승인 체크 확인을 포함한다 (HITL 최종 합격). 추천 지원자의 합격 메일은 관리자가 Notion 체크박스를 켠 경우에만 예약 시각(다음날 14:00 KST) 이후 발송된다.
 
 ---
 
@@ -179,10 +186,12 @@ POST 형식: `{ "target": "outbox_email", "row": [...] }`
 
 1. **GAS 302**: POST 후 Location GET으로 응답 확인 (`post_to_gas`)
 2. **재전송**: `retry_failed_outbox()`는 실패 outbox만 재전송. interviews/pipeline_log 중복 append 방지
-3. **학점 필수**: 온보딩 + `PIPELINE_REQUIRE_GPA=true` — 3.0 초과 필요 (`>3.0`, 3.0은 탈락)
+3. **학점 필터**: 커트라인 초과만 통과(동점 탈락). 학점 필수 여부/커트라인/신입 제외는 관리자 콘솔 "채용 담당 설정"에서 변경 가능하며 온보딩 UI(학점 필수 표시)도 따라감
 4. **GAS 배포 변경** 시 URL 갱신 + 앱 재시작
 5. **관리자 콘솔 기록**: 과거 면접은 로컬 JSONL에 저장된 기록만 보임. Google Sheets 전체 조회는 미구현
-6. **Delay/Notion HITL** (구 monolithic Zap 기능)은 미구현 — 필요 시 outbox_scheduled 확장
+6. **outbox_scheduled HITL**: 코드/GAS는 구현됨. 동작하려면 GAS **재배포** + 전용 Zap(Delay Until → Notion Find → Gmail) 구성 필요
+7. **재전송과 llm_fn**: `run_pipeline(skip_interview_save=True)` 재전송 시에도 `llm_fn`을 전달해야 보류 분기의 2차 질문 docs가 유실되지 않음 (`app.py execute_pipeline()`이 처리)
+8. **테스트 실행**: 전역 Python에 requests 없음 — `.venv\Scripts\python.exe -m unittest ...` 사용
 
 ---
 
@@ -203,8 +212,10 @@ python -m unittest tests/test_pipeline.py tests/test_admin_store.py
 - [x] 보류 시 LLM 2차 질문 + zoom outbox
 - [x] 통합 관리자 콘솔 + 로컬 스냅샷 + 실패 outbox 재전송
 - [x] 관리자 콘솔 Zapier 연결 가이드
+- [x] outbox_scheduled — Delay Until + Notion 체크박스 최종 합격 (코드/GAS 완료, Zap 구성 필요)
+- [x] 재전송 경로 2차 질문 유실 수정 + 파이프라인 실패 시 스냅샷 보존
+- [x] 분기별 E2E 검증 테스트 (40개)
 
 ### 미구현 / 확장 후보
-- Delay Until + Notion 체크박스 최종 합격 (outbox_scheduled)
 - Google Sheets 직접 조회 기반 전체 면접 히스토리
 - Zoom/Calendar를 코드에서 직접 호출 (현재 outbox→Zap)

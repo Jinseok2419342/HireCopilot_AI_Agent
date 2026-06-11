@@ -50,11 +50,14 @@ flowchart TD
 1. GAS 웹훅으로 `interviews` 탭에 면접 결과 저장.
 2. 기본 자격 필터 확인:
    - 이메일에 `@` 포함
-   - 학점이 `PIPELINE_MIN_GPA` 초과
+   - 학점이 커트라인 초과 (동점은 탈락)
    - 학위 입력
-   - 경력 입력
+   - 경력 입력 (옵션: 신입 제외)
+
+   필터 값(학점 커트라인, 학점 필수 여부, 신입 제외)은 관리자 콘솔의
+   "채용 담당 설정" 탭에서 변경할 수 있으며, `.env`의 `PIPELINE_*` 값보다 우선합니다.
 3. `hiring_opinion`에 따라 outbox 생성:
-   - `추천`: Notion 등록, 관리자 Slack/Email 알림
+   - `추천`: Notion 등록, 최종 합격 메일 예약(`outbox_scheduled`), 관리자 Slack/Email 알림
    - `보류`: 관리자 Slack/Email, Notion, Zoom, Docs용 2차 질문
    - `비추천`: 지원자 탈락 안내 Email
 4. `pipeline_log`에 처리 결과 기록.
@@ -86,6 +89,7 @@ flowchart TD
 | `outbox_notion` | Notion DB 항목 생성 큐 | 필요 |
 | `outbox_docs` | Google Docs 텍스트 추가 큐 | 필요 |
 | `outbox_zoom` | Zoom 미팅 생성 큐 | 필요 |
+| `outbox_scheduled` | 최종 합격 메일 예약 큐 (HITL) | 필요 |
 | `pipeline_log` | 파이프라인 로그 | 불필요 |
 
 ## Zapier 앱별 전용 Zap
@@ -99,6 +103,9 @@ flowchart TD
 | `outbox_notion` | New Spreadsheet Row | Notion Create Database Item | Name=`name`, Notes=`notes` |
 | `outbox_docs` | New Spreadsheet Row | Google Docs Append Text | Text=`content`, 문서 ID는 Zap에서 고정 |
 | `outbox_zoom` | New Spreadsheet Row | Zoom Create Meeting | Topic=`topic`, Start=`start_time_iso`, Duration=`duration_min` |
+| `outbox_scheduled` | New Spreadsheet Row | Delay Until → Notion Find Item → Gmail Send Email | Delay=`send_after_iso`, Notion 검색=`candidate_name`, To=`to`, Subject=`subject`, Body=`body` |
+
+`outbox_scheduled`만 예외적으로 Zap 안에 Delay Until과 Notion 조회가 들어갑니다. 추천 지원자의 최종 합격 메일은 관리자가 Notion에서 승인 체크박스를 켠 경우에만, 예약된 시각(`send_after_iso`, 다음날 오후 2시 KST) 이후에 발송됩니다. 사람의 승인(HITL)이 발송 게이트이며, 체크하지 않으면 메일은 나가지 않습니다.
 
 예를 들어 Gmail 발송은 이렇게 움직입니다.
 

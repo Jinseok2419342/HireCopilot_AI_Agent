@@ -400,8 +400,12 @@ def _llm_text(prompt: str) -> str:
     return llm_chat([{"role": "user", "content": prompt}], temperature=0.3)
 
 
-def execute_pipeline(payload: dict) -> PipelineResult:
-    """면접 결과 저장 + outbox 큐잉 (Zapier는 outbox 시트 New Row로 앱 연결)."""
+def execute_pipeline(payload: dict, *, skip_interview_save: bool = False) -> PipelineResult:
+    """면접 결과 저장 + outbox 큐잉 (Zapier는 outbox 시트 New Row로 앱 연결).
+
+    skip_interview_save=True면 interviews 행은 다시 쓰지 않고 outbox만 재생성한다.
+    재전송 경로에서도 llm_fn을 전달해야 보류 분기의 2차 질문이 유실되지 않는다.
+    """
     cfg = load_pipeline_config()
 
     if DUMMY_MODE:
@@ -421,6 +425,7 @@ def execute_pipeline(payload: dict) -> PipelineResult:
         admin_slack=cfg["admin_slack"],
         notion_database=cfg["notion_database"],
         llm_fn=llm_fn,
+        skip_interview_save=skip_interview_save,
     )
 
 
@@ -458,8 +463,19 @@ st.set_page_config(
     page_icon="🎓",
     layout="wide",  # 분할 화면 공간 확보
 )
-st.title("🎓 HireCopilot - AI 면접 챗봇")
-st.caption(PROJECT_NOTICE)
+
+st.markdown(
+    """
+    <div style="background:linear-gradient(90deg,#0f766e 0%,#14b8a6 60%,#5eead4 100%);
+                padding:20px 28px;border-radius:16px;margin-bottom:14px;">
+      <h2 style="color:#ffffff;margin:0;">🎓 HireCopilot — AI 면접 챗봇</h2>
+      <p style="color:#ecfdf5;margin:6px 0 0;font-size:0.95rem;">
+        AI 면접관과 한국어로 대화하는 모의 면접 · 학교 프로젝트 프로토타입
+      </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # 우측 개발자 패널을 화면 우측에 sticky 고정시키는 CSS.
 # 채팅이 길어져 좌측이 스크롤되어도 우측 패널은 항상 같은 위치에 보입니다.
@@ -479,6 +495,21 @@ st.markdown(
     div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-of-type(1) {
         min-height: 60vh;
     }
+    /* 채팅 말풍선 — 테마(라이트/다크) 변수 사용으로 글자 가림 방지 */
+    div[data-testid="stChatMessage"] {
+        border-radius: 14px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.25);
+    }
+    /* 온보딩/폼 카드 */
+    div[data-testid="stForm"] {
+        border: 1px solid rgba(128, 128, 128, 0.3);
+        border-radius: 16px;
+        padding: 22px;
+    }
+    button[kind="primaryFormSubmit"], button[kind="primary"] { border-radius: 10px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -513,12 +544,17 @@ if not st.session_state.onboarding_done:
     with center_col:
         st.subheader("📋 면접 시작 전 정보 입력")
         st.caption("아래 정보를 모두 입력해야 면접을 시작할 수 있습니다.")
+        # 관리자 콘솔의 자격 필터 설정(학점 필수 여부)을 온보딩에도 반영
+        _gpa_required = load_pipeline_config()["require_gpa"]
         with st.form("onboarding_form"):
             ob_name = st.text_input("이름 *", placeholder="홍길동")
             ob_email = st.text_input("이메일 *", placeholder="example@email.com")
             ob_degree = st.selectbox("최종 학력 *", options=DEGREE_OPTIONS)
             ob_experience = st.selectbox("경력 *", options=EXPERIENCE_OPTIONS)
-            ob_gpa = st.text_input("학점 *", placeholder="예: 4.2 / 4.5")
+            ob_gpa = st.text_input(
+                "학점 *" if _gpa_required else "학점 (선택)",
+                placeholder="예: 4.2 / 4.5",
+            )
             # 채용 담당자가 등록한 포지션 우선 표시, 없으면 기본 POSITIONS 사용
             _ob_rcfg = load_recruiter_config()
             _ob_positions = [p["name"] for p in _ob_rcfg.get("positions", [])]
@@ -530,7 +566,7 @@ if not st.session_state.onboarding_done:
                     errors.append("이름을 입력해 주세요.")
                 if not ob_email.strip() or "@" not in ob_email:
                     errors.append("유효한 이메일 주소를 입력해 주세요.")
-                if not ob_gpa.strip():
+                if _gpa_required and not ob_gpa.strip():
                     errors.append("학점을 입력해 주세요 (2차 파이프라인 자격 필터에 사용됩니다).")
                 if errors:
                     for err in errors:
@@ -567,7 +603,6 @@ with st.sidebar:
     st.write(f"**경력:** {st.session_state.get('experience', '-')}")
     if st.session_state.get('gpa'):
         st.write(f"**학점:** {st.session_state.get('gpa')}")
-    st.divider()
     st.divider()
     # 개발자 모드 토글 - 암호 인증 후 활성화
     toggle_val = st.toggle(
@@ -855,8 +890,12 @@ with chat_col:
         visible = m["content"].replace("[[INTERVIEW_COMPLETE]]", "").strip()
         if not visible:
             continue
-        with st.chat_message("assistant" if m["role"] == "assistant" else "user"):
-            st.markdown(visible)
+        if m["role"] == "assistant":
+            with st.chat_message("assistant", avatar="🧑‍💼"):
+                st.markdown(visible)
+        else:
+            with st.chat_message("user", avatar="🙋"):
+                st.markdown(visible)
 
 # --- 채팅 입력 (st.chat_input은 컬럼 밖에 있어야 페이지 하단에 고정됨) ---
 if not st.session_state.interview_done:
@@ -941,7 +980,13 @@ if st.session_state.interview_done and st.session_state.final_payload is None:
     )
     st.session_state.final_payload = payload
 
-    st.session_state.pipeline_result = execute_pipeline(payload)
+    # 파이프라인이 실패해도 면접 기록(스냅샷)은 반드시 저장되어야 한다.
+    try:
+        st.session_state.pipeline_result = execute_pipeline(payload)
+        st.session_state.pipeline_error = None
+    except Exception as e:
+        st.session_state.pipeline_result = None
+        st.session_state.pipeline_error = f"{type(e).__name__}: {e}"
     try:
         save_interview_record(payload, st.session_state.pipeline_result)
     except OSError as e:
@@ -985,30 +1030,87 @@ def _render_pipeline_status(result: PipelineResult) -> None:
 
 # --- 결과 표시 ---
 if st.session_state.final_payload is not None:
-    st.subheader("최종 평가 결과")
-    st.caption(PROJECT_NOTICE)
+    # 면접 완료 축하 효과 (최초 1회)
+    if not st.session_state.get("celebrated"):
+        st.balloons()
+        st.session_state.celebrated = True
+
+    final = st.session_state.final_payload
+    scores = final.get("scores") or {}
+    fit_labels = {
+        "strong_match": "🌟 강한 적합",
+        "possible_match": "👍 적합 가능",
+        "needs_human_review": "🔍 사람 검토 필요",
+        "weak_match": "📉 적합도 낮음",
+    }
+
+    st.subheader("📋 최종 평가 결과")
+    st.caption(PROJECT_NOTICE + " — AI 평가는 사람 검토를 돕기 위한 참고 자료입니다.")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("종합 점수", f"{scores.get('overall', '-')} / 5")
+    m2.metric("적합도", fit_labels.get(final.get("fit_level"), final.get("fit_level", "-")))
+    opinion_badge = {"추천": "🟢 추천", "보류": "🟡 보류", "비추천": "🔴 비추천"}.get(
+        final.get("hiring_opinion", ""), final.get("hiring_opinion") or "—"
+    )
+    m3.metric("채용 의견", opinion_badge)
+
+    if final.get("summary"):
+        st.markdown(f"> {final['summary']}")
+
+    col_s, col_c = st.columns(2)
+    with col_s:
+        if final.get("strengths"):
+            st.markdown("**💪 강점**")
+            for s in final["strengths"]:
+                st.markdown(f"- {s}")
+    with col_c:
+        if final.get("concerns"):
+            st.markdown("**⚠️ 우려사항**")
+            for c in final["concerns"]:
+                st.markdown(f"- {c}")
+
+    st.divider()
+    st.markdown("**🔄 파이프라인 상태**")
 
     if st.session_state.pipeline_result:
         _render_pipeline_status(st.session_state.pipeline_result)
     else:
+        if st.session_state.get("pipeline_error"):
+            st.error(
+                f"⚠️ 파이프라인 실행 실패: {st.session_state.pipeline_error}\n\n"
+                "면접 기록은 저장되었습니다. 아래 버튼으로 다시 시도할 수 있습니다."
+            )
+        def _rerun_pipeline(skip_interview_save: bool) -> None:
+            try:
+                st.session_state.pipeline_result = execute_pipeline(
+                    st.session_state.final_payload,
+                    skip_interview_save=skip_interview_save,
+                )
+                st.session_state.pipeline_error = None
+            except Exception as e:
+                st.session_state.pipeline_result = None
+                st.session_state.pipeline_error = f"{type(e).__name__}: {e}"
+            try:
+                save_interview_record(st.session_state.final_payload, st.session_state.pipeline_result)
+            except OSError:
+                pass
+            st.rerun()
+
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("outbox만 재전송", help="interviews 행 중복 없이 outbox만 다시 전송"):
-                st.session_state.pipeline_result = run_pipeline(
-                    st.session_state.final_payload,
-                    skip_interview_save=True,
-                )
-                st.rerun()
+                _rerun_pipeline(skip_interview_save=True)
         with col_b:
             if st.button("전체 재실행", help="interviews 행 + outbox 모두 다시 기록 (행 중복 주의)"):
-                st.session_state.pipeline_result = execute_pipeline(st.session_state.final_payload)
-                st.rerun()
+                _rerun_pipeline(skip_interview_save=False)
 
-    st.write("**디버그용 JSON 페이로드**")
-    st.json(st.session_state.final_payload)
+    st.divider()
+    with st.expander("🐞 디버그용 JSON 페이로드"):
+        st.json(st.session_state.final_payload)
 
     st.download_button(
-        "JSON 다운로드",
+        "📥 평가 JSON 다운로드",
         data=json.dumps(st.session_state.final_payload, indent=2, ensure_ascii=False),
         file_name="evaluation.json",
         mime="application/json",
