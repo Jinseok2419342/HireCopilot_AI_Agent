@@ -153,6 +153,175 @@ def _result_rows(record: dict) -> list[dict]:
     return rows
 
 
+def _unique_positions(records: list[dict]) -> list[str]:
+    positions = sorted(
+        {
+            (r.get("payload") or {}).get("position", "").strip()
+            for r in records
+            if (r.get("payload") or {}).get("position", "").strip()
+        }
+    )
+    return positions
+
+
+def filter_records(
+    records: list[dict],
+    *,
+    query: str = "",
+    opinion: str = "전체",
+    position: str = "전체",
+    screening: str = "전체",
+    failed_outbox_only: bool = False,
+) -> list[dict]:
+    """이름·이메일·포지션 검색 및 운영 필터."""
+    filtered = list(records)
+    q = query.strip().lower()
+    if q:
+        filtered = [
+            r
+            for r in filtered
+            if q in (r.get("payload") or {}).get("candidate_name", "").lower()
+            or q in (r.get("payload") or {}).get("candidate_email", "").lower()
+            or q in (r.get("payload") or {}).get("position", "").lower()
+        ]
+    if opinion != "전체":
+        filtered = [
+            r for r in filtered if (r.get("payload") or {}).get("hiring_opinion") == opinion
+        ]
+    if position != "전체":
+        filtered = [
+            r for r in filtered if (r.get("payload") or {}).get("position") == position
+        ]
+    if screening == "통과":
+        filtered = [r for r in filtered if (r.get("pipeline_result") or {}).get("screening_passed")]
+    elif screening == "실패":
+        filtered = [r for r in filtered if not (r.get("pipeline_result") or {}).get("screening_passed")]
+    if failed_outbox_only:
+        filtered = [r for r in filtered if failed_outbox_count(r) > 0]
+    return filtered
+
+
+def _render_record_filters(records: list[dict], key_prefix: str) -> list[dict]:
+    query = st.text_input(
+        "🔍 이름·이메일·포지션 검색",
+        key=f"{key_prefix}_search",
+        placeholder="검색어를 입력하세요",
+    )
+    with st.expander("필터 옵션", expanded=False):
+        positions = _unique_positions(records)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.selectbox("채용 의견", ["전체", "추천", "보류", "비추천"], key=f"{key_prefix}_opinion")
+        with col2:
+            st.selectbox("포지션", ["전체", *positions], key=f"{key_prefix}_position")
+        with col3:
+            st.selectbox("자격 심사", ["전체", "통과", "실패"], key=f"{key_prefix}_screening")
+        st.checkbox("알림 실패만 보기", key=f"{key_prefix}_failed_only")
+
+    opinion = st.session_state.get(f"{key_prefix}_opinion", "전체")
+    position = st.session_state.get(f"{key_prefix}_position", "전체")
+    screening = st.session_state.get(f"{key_prefix}_screening", "전체")
+    failed_only = st.session_state.get(f"{key_prefix}_failed_only", False)
+
+    filtered = filter_records(
+        records,
+        query=query,
+        opinion=opinion,
+        position=position,
+        screening=screening,
+        failed_outbox_only=failed_only,
+    )
+    st.caption(f"{len(filtered)}명 표시 (전체 {len(records)}명)")
+    return filtered
+
+
+def _render_record_detail(record: dict) -> None:
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    scores = payload.get("scores") or {}
+
+    st.markdown(f"**기록 ID:** `{record.get('record_id', '-')}`")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.write(f"**이름:** {payload.get('candidate_name', '-')}")
+        st.write(f"**이메일:** {payload.get('candidate_email', '-')}")
+        st.write(f"**포지션:** {payload.get('position', '-')}")
+    with col_b:
+        st.write(f"**학력:** {payload.get('degree', '-')}")
+        st.write(f"**경력:** {payload.get('experience', '-')}")
+        st.write(f"**학점:** {payload.get('gpa', '-') or '-'}")
+    with col_c:
+        st.write(f"**적합도:** {payload.get('fit_level', '-')}")
+        st.write(f"**채용 의견:** {_opinion_badge(payload.get('hiring_opinion'))}")
+        st.write(f"**종합 점수:** {scores.get('overall', '-')} / 5")
+
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
+        st.markdown("**평가 요약**")
+        st.write(payload.get("summary") or "(요약 없음)")
+        if payload.get("hiring_recommendation_reason"):
+            st.markdown("**채용 판단 이유**")
+            st.write(payload["hiring_recommendation_reason"])
+        st.markdown("**추천 다음 단계**")
+        st.write(payload.get("recommended_next_step") or "(다음 단계 없음)")
+    with col_right:
+        st.markdown("**파이프라인**")
+        saved = result.get("interview_saved", ["", ""])
+        st.write(f"면접 저장: {saved[1] if len(saved) > 1 else '-'}")
+        passed = result.get("screening_passed")
+        st.write(f"자격 필터: {'✅ 통과' if passed else '🚫 ' + str(result.get('screening_reason', '-'))}")
+        st.write(f"분기: {result.get('branch', '-')}")
+        fail_n = failed_outbox_count(record)
+        if fail_n:
+            st.error(f"실패 outbox {fail_n}건")
+        else:
+            st.success("outbox 정상")
+
+    rubric_labels = {
+        "culture_fit": "문화 적합도",
+        "customer_response": "고객 응대",
+        "ownership": "주인의식",
+        "communication": "커뮤니케이션",
+        "learning_agility": "학습 민첩성",
+    }
+    score_cols = st.columns(5)
+    for col, (key, label) in zip(score_cols, rubric_labels.items()):
+        col.metric(label, f"{scores.get(key, '-')} / 5")
+
+    col_s, col_c = st.columns(2)
+    with col_s:
+        if payload.get("strengths"):
+            st.markdown("**강점**")
+            for item in payload["strengths"]:
+                st.markdown(f"- {item}")
+    with col_c:
+        if payload.get("concerns"):
+            st.markdown("**우려사항**")
+            for item in payload["concerns"]:
+                st.markdown(f"- {item}")
+
+    with st.expander("평가 JSON 보기"):
+        st.json(payload)
+    with st.expander("대화록 보기"):
+        st.code(payload.get("transcript") or "(대화록 없음)", language="text")
+
+
+def _clear_recruiter_ui_state() -> None:
+    """로그아웃 시 관리자 UI 전용 세션 키만 정리."""
+    for key in (
+        "recruiter_positions",
+        "interview_detail_select",
+        "outbox_detail_select",
+        "retry_record_select",
+        "instant_record_select",
+        "instant_action_select",
+    ):
+        st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if key.startswith(("dash_", "iv_", "ob_")):
+            st.session_state.pop(key, None)
+
+
 # ---------------------------------------------------------------------------
 # 시뮬레이션 / 수동 작업 helpers
 # ---------------------------------------------------------------------------
@@ -254,24 +423,28 @@ MANUAL_OUTBOX_TARGETS = [
 # ---------------------------------------------------------------------------
 
 def render_dashboard(records: list[dict]) -> None:
-    st.subheader("운영 대시보드")
     summary = summarize_records(records)
     cfg = load_pipeline_config()
 
+    st.markdown("### 오늘의 현황")
     cols = st.columns(4)
-    cols[0].metric("📋 최근 면접", summary["total"])
-    cols[1].metric("🟢 추천", summary["recommended"])
-    cols[2].metric("🟡 보류", summary["hold"])
-    cols[3].metric("🔴 비추천", summary["rejected"])
+    cols[0].metric("전체 면접", summary["total"])
+    cols[1].metric("추천", summary["recommended"])
+    cols[2].metric("보류", summary["hold"])
+    cols[3].metric("비추천", summary["rejected"])
 
-    cols = st.columns(3)
-    cols[0].metric("✅ 자격 통과", summary["screening_passed"])
-    cols[1].metric("🚫 자격 실패", summary["screening_failed"])
-    cols[2].metric("⚠️ 실패 outbox", summary["failed_outbox"])
+    failed_records = [r for r in records if failed_outbox_count(r) > 0]
+    if failed_records:
+        st.warning(f"알림 전송 실패 {len(failed_records)}건 — **알림/파이프라인** 메뉴에서 재전송하세요.")
+
+    cols2 = st.columns(3)
+    cols2[0].metric("자격 통과", summary["screening_passed"])
+    cols2[1].metric("자격 미달", summary["screening_failed"])
+    cols2[2].metric("알림 실패", summary["failed_outbox"])
 
     if records:
         st.divider()
-        st.markdown("**🕒 최근 면접 5건**")
+        st.markdown("**최근 면접**")
         recent_rows = []
         for record in records[:5]:
             payload = record.get("payload") or {}
@@ -288,104 +461,103 @@ def render_dashboard(records: list[dict]) -> None:
             )
         st.dataframe(recent_rows, use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.markdown("**🔧 시스템 설정 상태**")
-    status_rows = [
-        {"항목": "OpenAI API Key", "상태": _ok_badge(bool(os.getenv("OPENAI_API_KEY", "").strip()))},
-        {"항목": "GAS Webhook", "상태": _ok_badge(bool(cfg["webhook_url"]))},
-        {"항목": "관리자 이메일", "상태": _ok_badge(bool(cfg["admin_email"]))},
-        {"항목": "관리자 Slack", "상태": _ok_badge(bool(cfg["admin_slack"]))},
-        {
-            "항목": "자격 필터",
-            "상태": (
-                f"학점 > {cfg['min_gpa']} · "
-                f"학점 필수 {'ON' if cfg['require_gpa'] else 'OFF'} · "
-                f"신입 제외 {'ON' if cfg['block_newgrad'] else 'OFF'}"
-            ),
-        },
-    ]
-    st.dataframe(status_rows, use_container_width=True, hide_index=True)
+    with st.expander("연결 상태 확인"):
+        ok_api = bool(os.getenv("OPENAI_API_KEY", "").strip())
+        ok_gas = bool(cfg["webhook_url"])
+        c1, c2, c3 = st.columns(3)
+        c1.write(f"OpenAI: {_ok_badge(ok_api)}")
+        c2.write(f"시트 연결: {_ok_badge(ok_gas)}")
+        c3.write(
+            f"자격 기준: 학점>{cfg['min_gpa']}, "
+            f"학점필수{'O' if cfg['require_gpa'] else 'X'}"
+        )
 
     if not records:
-        st.info("아직 관리자 콘솔에 기록된 면접이 없습니다. 지원자 앱에서 면접을 완료하면 여기에 표시됩니다.")
+        st.info("아직 면접 기록이 없습니다. 지원자가 `app.py`에서 면접을 완료하면 여기에 나타납니다.")
 
 
 def render_interviews(records: list[dict]) -> None:
-    st.subheader("지원자 / 면접 결과")
+    st.markdown("### 지원자 목록")
     if not records:
-        st.info("표시할 면접 기록이 없습니다.")
+        st.info("면접을 완료한 지원자가 없습니다.")
+        return
+
+    filtered = _render_record_filters(records, "iv")
+    if not filtered:
+        st.warning("필터 조건에 맞는 기록이 없습니다.")
         return
 
     overview_rows = []
-    for record in records:
+    for record in filtered:
         payload = record.get("payload") or {}
         result = record.get("pipeline_result") or {}
         overview_rows.append(
             {
+                "일시": (payload.get("timestamp") or record.get("recorded_at") or "")[:16],
                 "이름": payload.get("candidate_name", ""),
                 "이메일": payload.get("candidate_email", ""),
                 "포지션": payload.get("position", ""),
                 "학점": payload.get("gpa", ""),
                 "적합도": payload.get("fit_level", ""),
                 "채용 의견": _opinion_badge(payload.get("hiring_opinion")),
+                "자격": "✅" if result.get("screening_passed") else "🚫",
                 "분기": result.get("branch", ""),
                 "outbox 실패": failed_outbox_count(record),
             }
         )
     st.dataframe(overview_rows, use_container_width=True, hide_index=True)
 
+    st.divider()
     selected = st.selectbox(
         "상세 조회할 지원자",
-        options=records,
+        options=filtered,
         format_func=_format_record_label,
         key="interview_detail_select",
     )
-    payload = selected.get("payload") or {}
-    result = selected.get("pipeline_result") or {}
-
-    col_a, col_b = st.columns([2, 1])
-    with col_a:
-        st.markdown("**평가 요약**")
-        st.write(payload.get("summary") or "(요약 없음)")
-        st.markdown("**추천 다음 단계**")
-        st.write(payload.get("recommended_next_step") or "(다음 단계 없음)")
-    with col_b:
-        st.markdown("**파이프라인**")
-        st.write(f"면접 저장: {result.get('interview_saved', ['', ''])[1] if result else '-'}")
-        st.write(f"자격 필터: {result.get('screening_reason', '-')}")
-        st.write(f"분기: {result.get('branch', '-')}")
-
-    if payload.get("concerns"):
-        st.markdown("**우려사항**")
-        for concern in payload["concerns"]:
-            st.markdown(f"- {concern}")
-
-    with st.expander("평가 JSON 보기"):
-        st.json(payload)
-    with st.expander("대화록 보기"):
-        st.code(payload.get("transcript") or "(대화록 없음)", language="text")
+    _render_record_detail(selected)
 
 
 def render_outbox(records: list[dict]) -> None:
-    st.subheader("outbox / 파이프라인 상태")
+    st.markdown("### 알림 · 파이프라인")
     if not records:
-        st.info("표시할 파이프라인 기록이 없습니다.")
+        st.info("처리할 기록이 없습니다.")
         return
 
     failed_records = [record for record in records if failed_outbox_count(record) > 0]
-    st.caption("실패 outbox 재전송은 interviews 행을 다시 저장하지 않고, 실패한 outbox 요청만 다시 보냅니다.")
+    st.caption("재전송 시 면접 기록은 중복 저장되지 않고, 실패한 알림만 다시 보냅니다.")
+
+    filtered = _render_record_filters(records, "ob")
+    if not filtered:
+        st.warning("필터 조건에 맞는 기록이 없습니다.")
+        return
 
     selected = st.selectbox(
         "outbox 상태를 확인할 지원자",
-        options=records,
+        options=filtered,
         format_func=_format_record_label,
         key="outbox_detail_select",
     )
+    payload = selected.get("payload") or {}
+    result = selected.get("pipeline_result") or {}
+    st.markdown(
+        f"**{payload.get('candidate_name', '-')}** · "
+        f"{_opinion_badge(payload.get('hiring_opinion'))} · "
+        f"분기 `{result.get('branch', '-')}` · "
+        f"자격 {'✅' if result.get('screening_passed') else '🚫'}"
+    )
+
     rows = _result_rows(selected)
     if rows:
+        failed_rows = [r for r in rows if r["status"] == "실패" and r["target"] != "pipeline_log"]
+        if failed_rows:
+            st.error(f"실패한 outbox 액션 {len(failed_rows)}건")
         st.dataframe(
             [
-                {"target": row["target"], "status": row["status"], "message": row["message"]}
+                {
+                    "target": row["target"],
+                    "status": row["status"],
+                    "message": row["message"],
+                }
                 for row in rows
             ],
             use_container_width=True,
@@ -394,12 +566,12 @@ def render_outbox(records: list[dict]) -> None:
         with st.expander("전송 row 원본 보기"):
             st.json(rows)
     else:
-        st.info("이 기록에는 outbox 전송 결과가 없습니다.")
+        st.info("이 기록에는 outbox 전송 결과가 없습니다. (파이프라인 미실행 또는 드라이런 기록일 수 있습니다)")
 
     st.divider()
-    st.markdown("**실패 outbox 재전송**")
+    st.markdown("**알림 재전송**")
     if not failed_records:
-        st.success("현재 로컬 기록 기준 실패한 outbox가 없습니다.")
+        st.success("실패한 알림이 없습니다.")
         return
 
     retry_target = st.selectbox(
@@ -408,7 +580,7 @@ def render_outbox(records: list[dict]) -> None:
         format_func=_format_record_label,
         key="retry_record_select",
     )
-    if st.button("실패 outbox만 재전송", type="primary", use_container_width=True):
+    if st.button("실패한 알림 다시 보내기", type="primary", use_container_width=True):
         result = pipeline_result_from_dict(retry_target.get("pipeline_result"))
         if result is None:
             st.error("재전송할 파이프라인 결과를 복원하지 못했습니다.")
@@ -420,8 +592,8 @@ def render_outbox(records: list[dict]) -> None:
 
 
 def render_simulator(records: list[dict]) -> None:
-    st.subheader("🧪 시뮬레이션 / 수동 작업")
-    st.caption("실제 면접 없이 여러 상황을 가정해 파이프라인을 실행하거나, 예약된 작업을 즉시 실행하고, outbox 행을 수동으로 보내 Zap 연결을 점검합니다.")
+    st.markdown("### 테스트 도구")
+    st.caption("면접 없이 파이프라인을 테스트하거나, Zapier 연결을 점검합니다. (운영자 전용)")
     cfg = load_pipeline_config()
 
     tab_scenario, tab_instant, tab_manual = st.tabs(
@@ -1017,90 +1189,123 @@ def render_recruiting_settings(config: dict) -> None:
 # App shell
 # ---------------------------------------------------------------------------
 
+_NAV_ITEMS = [
+    "📊 대시보드",
+    "🧑‍💼 지원자 목록",
+    "📤 알림/파이프라인",
+    "🧪 테스트 도구",
+    "⚡ Zapier 연결",
+    "⚙️ 설정",
+]
+
 st.set_page_config(
-    page_title="HireCopilot - 통합 관리자 콘솔",
+    page_title="HireCopilot — 관리자",
     page_icon="👔",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown(
     """
     <style>
-    /* 메트릭 카드 — 테마(라이트/다크) 변수 사용으로 글자 가림 방지 */
     div[data-testid="stMetric"] {
         background: var(--secondary-background-color);
-        color: var(--text-color);
-        border: 1px solid rgba(128, 128, 128, 0.25);
+        border: 1px solid rgba(128,128,128,0.18);
         border-radius: 14px;
-        padding: 14px 18px;
+        padding: 16px 18px;
     }
-    div[data-testid="stMetricValue"] { font-weight: 700; }
-    /* 탭 라벨 */
-    button[data-baseweb="tab"] { font-weight: 600; }
-    /* 데이터프레임 모서리 */
-    div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+    div[data-testid="stMetricValue"] { font-weight: 700; font-size: 1.6rem; }
+    div[data-testid="stSidebar"] { background: var(--secondary-background-color); }
+    .rc-hero {
+        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 60%, #60a5fa 100%);
+        padding: 24px 28px;
+        border-radius: 18px;
+        margin-bottom: 20px;
+        color: #fff;
+    }
+    .rc-hero h1 { margin: 0; font-size: 1.5rem; }
+    .rc-hero p { margin: 6px 0 0; opacity: 0.9; font-size: 0.9rem; }
+    .rc-login {
+        max-width: 400px;
+        margin: 60px auto;
+        padding: 36px 32px;
+        border-radius: 20px;
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,0.2);
+        box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div style="background:linear-gradient(90deg,#1f3c88 0%,#5063ab 60%,#7b8cc7 100%);
-                padding:20px 28px;border-radius:16px;margin-bottom:14px;">
-      <h2 style="color:#ffffff;margin:0;">👔 HireCopilot 통합 관리자 콘솔</h2>
-      <p style="color:#dfe6ff;margin:6px 0 0;font-size:0.95rem;">
-        면접 운영 현황 · 파이프라인 상태 · 시뮬레이션 · Zapier 연결 · 채용 기준 설정
-      </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 if not st.session_state.get("recruiter_authenticated"):
-    st.subheader("채용 담당자 인증")
-    pw = st.text_input("암호", type="password", key="recruiter_login_pw")
-    if st.button("로그인", key="recruiter_login_btn", use_container_width=True):
-        if (RECRUITER_PASSWORD and pw == RECRUITER_PASSWORD) or not RECRUITER_PASSWORD:
-            st.session_state.recruiter_authenticated = True
-            st.rerun()
-        else:
-            st.error("암호가 올바르지 않습니다.")
+    st.markdown(
+        '<div class="rc-login">'
+        '<h2 style="text-align:center;margin-top:0;">👔 채용 관리자</h2>'
+        '<p style="text-align:center;opacity:0.7;">HireCopilot 관리자 콘솔</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    _, col, _ = st.columns([1, 1.2, 1])
+    with col:
+        if not RECRUITER_PASSWORD:
+            st.caption("암호가 설정되지 않아 바로 들어갈 수 있습니다.")
+        pw = st.text_input("암호", type="password", key="recruiter_login_pw", label_visibility="collapsed", placeholder="암호 입력")
+        if st.button("로그인", key="recruiter_login_btn", use_container_width=True, type="primary"):
+            if (RECRUITER_PASSWORD and pw == RECRUITER_PASSWORD) or not RECRUITER_PASSWORD:
+                st.session_state.recruiter_authenticated = True
+                st.rerun()
+            else:
+                st.error("암호가 올바르지 않습니다.")
     st.stop()
 
 config = load_recruiter_config()
 records = list_interview_records(limit=100)
 
 with st.sidebar:
-    st.header("관리 메뉴")
-    if st.button("새로고침", use_container_width=True):
+    st.markdown("### HireCopilot")
+    st.caption("채용 관리자")
+    st.divider()
+    page = st.radio(
+        "메뉴",
+        _NAV_ITEMS,
+        label_visibility="collapsed",
+        key="recruiter_nav",
+    )
+    st.divider()
+    st.caption(f"면접 기록 {len(records)}건")
+    if st.button("🔄 새로고침", use_container_width=True):
         st.rerun()
     if st.button("로그아웃", key="recruiter_logout", use_container_width=True):
         st.session_state.recruiter_authenticated = False
-        st.session_state.pop("recruiter_positions", None)
+        st.session_state.pop("recruiter_nav", None)
+        _clear_recruiter_ui_state()
         st.rerun()
 
-tab_dashboard, tab_interviews, tab_outbox, tab_sim, tab_zapier, tab_filters, tab_settings = st.tabs(
-    ["📊 대시보드", "🧑‍💼 지원자/면접 결과", "📤 outbox/파이프라인", "🧪 시뮬레이션/수동 작업", "⚡ Zapier 연결 가이드", "🚦 자격 필터", "⚙️ 채용 담당 설정"]
+st.markdown(
+    """
+    <div class="rc-hero">
+      <h1>👔 채용 관리자 콘솔</h1>
+      <p>면접 결과 확인 · 알림 관리 · 채용 설정</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-with tab_dashboard:
+if page == "📊 대시보드":
     render_dashboard(records)
-
-with tab_interviews:
+elif page == "🧑‍💼 지원자 목록":
     render_interviews(records)
-
-with tab_outbox:
+elif page == "📤 알림/파이프라인":
     render_outbox(records)
-
-with tab_sim:
+elif page == "🧪 테스트 도구":
     render_simulator(records)
-
-with tab_zapier:
+elif page == "⚡ Zapier 연결":
     render_zapier_guide()
-
-with tab_filters:
-    render_filter_settings(config)
-
-with tab_settings:
-    render_recruiting_settings(config)
+elif page == "⚙️ 설정":
+    tab_recruit, tab_filter = st.tabs(["채용 기준", "자격 필터"])
+    with tab_recruit:
+        render_recruiting_settings(config)
+    with tab_filter:
+        render_filter_settings(config)

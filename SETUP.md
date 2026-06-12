@@ -90,13 +90,15 @@ Zapier는 앱 연결만 담당합니다. 필터, 분기, 2차 질문 생성은 `
 
 각 Zap의 Trigger는 모두 `Google Sheets -> New Spreadsheet Row`입니다. Trigger 시트만 outbox별로 다르게 지정합니다.
 
-| Zap 이름 예시 | Trigger 시트 | Action 앱 | 필수 매핑 |
-|---|---|---|---|
-| `outbox_email_to_gmail` | `outbox_email` | Gmail Send Email | To=`to`, Subject=`subject`, Body=`body` |
-| `outbox_slack_to_dm` | `outbox_slack` | Slack Send Direct Message | User=`recipient`, Message=`message` |
-| `outbox_notion_to_db` | `outbox_notion` | Notion Create Database Item | Name=`name`, Notes=`notes` |
-| `outbox_docs_to_doc` | `outbox_docs` | Google Docs Append Text | Text=`content`, 문서 ID는 Zap에서 고정 |
-| `outbox_zoom_to_meeting` | `outbox_zoom` | Zoom Create Meeting | Topic=`topic`, Start=`start_time_iso`, Duration=`duration_min` |
+
+| Zap 이름 예시                | Trigger 시트      | Action 앱                    | 필수 매핑                                                          |
+| ------------------------ | --------------- | --------------------------- | -------------------------------------------------------------- |
+| `outbox_email_to_gmail`  | `outbox_email`  | Gmail Send Email            | To=`to`, Subject=`subject`, Body=`body`                        |
+| `outbox_slack_to_dm`     | `outbox_slack`  | Slack Send Direct Message   | User=`recipient`, Message=`message`                            |
+| `outbox_notion_to_db`    | `outbox_notion` | Notion Create Database Item | Name=`name`, Notes=`notes`                                     |
+| `outbox_docs_to_doc`     | `outbox_docs`   | Google Docs Append Text     | Text=`content`, 문서 ID는 Zap에서 고정                                |
+| `outbox_zoom_to_meeting` | `outbox_zoom`   | Zoom Create Meeting         | Topic=`topic`, Start=`start_time_iso`, Duration=`duration_min` |
+
 
 예시: Gmail Zap
 
