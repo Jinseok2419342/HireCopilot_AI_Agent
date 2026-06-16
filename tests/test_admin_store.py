@@ -11,6 +11,7 @@ from admin_store import (
     save_interview_record,
     summarize_records,
     update_pipeline_result,
+    update_review_status,
 )
 from pipeline import OutboxAction, PipelineResult
 
@@ -103,6 +104,43 @@ class TestAdminStore(unittest.TestCase):
             )
             records = list_interview_records(path=path)
         self.assertEqual(records[0]["payload"]["candidate_email"], "x@y.z")
+
+    def test_recommended_candidate_starts_pending_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            result = PipelineResult(
+                interview_saved=(True, "ok"),
+                screening_passed=True,
+                screening_reason="통과",
+                branch="추천",
+                actions=[],
+                action_results=[],
+            )
+            record = save_interview_record(
+                _payload(hiring_opinion="추천"),
+                result,
+                path=path,
+            )
+        self.assertEqual(record["review"]["status"], "pending")
+
+    def test_update_review_status_and_preserve_on_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            record = save_interview_record(_payload(hiring_opinion="추천"), _result(), path=path)
+            updated = update_review_status(
+                record["record_id"],
+                "approved_sent",
+                note="sent ok",
+                reviewer="tester",
+                path=path,
+            )
+            save_interview_record(_payload(hiring_opinion="추천", candidate_name="김철수"), _result(), path=path)
+            records = list_interview_records(path=path)
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(records[0]["review"]["status"], "approved_sent")
+        self.assertEqual(records[0]["review"]["note"], "sent ok")
+        self.assertEqual(records[0]["payload"]["candidate_name"], "김철수")
 
 
 if __name__ == "__main__":

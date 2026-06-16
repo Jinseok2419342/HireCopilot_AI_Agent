@@ -18,6 +18,7 @@ from admin_store import (
     save_interview_record,
     summarize_records,
     update_pipeline_result,
+    update_review_status,
 )
 from pipeline import (
     KST,
@@ -153,6 +154,37 @@ def _result_rows(record: dict) -> list[dict]:
     return rows
 
 
+def _review_badge(review: dict | None) -> str:
+    status = (review or {}).get("status") or "not_required"
+    return {
+        "pending": "⏳ 승인 대기",
+        "approved_sent": "✅ 승인/발송 완료",
+        "approved_send_failed": "⚠️ 승인됨 · 발송 실패",
+        "rejected_by_admin": "🛑 관리자 반려",
+        "held_by_admin": "🟡 추가 보류",
+        "not_required": "—",
+    }.get(status, status)
+
+
+def _effective_review(record: dict) -> dict:
+    review = record.get("review")
+    if review:
+        return review
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    if payload.get("hiring_opinion") == "추천" and result.get("screening_passed"):
+        return {"status": "pending", "note": "", "updated_at": ""}
+    return {"status": "not_required", "note": "", "updated_at": ""}
+
+
+def _scheduled_action_row(record: dict) -> list | None:
+    actions = (record.get("pipeline_result") or {}).get("actions") or []
+    for action in actions:
+        if action.get("target") == "outbox_scheduled":
+            return list(action.get("row") or [])
+    return None
+
+
 def _unique_positions(records: list[dict]) -> list[str]:
     positions = sorted(
         {
@@ -253,6 +285,7 @@ def _render_record_detail(record: dict) -> None:
     with col_c:
         st.write(f"**적합도:** {payload.get('fit_level', '-')}")
         st.write(f"**채용 의견:** {_opinion_badge(payload.get('hiring_opinion'))}")
+        st.write(f"**최종 검토:** {_review_badge(_effective_review(record))}")
         st.write(f"**종합 점수:** {scores.get('overall', '-')} / 5")
 
     col_left, col_right = st.columns([2, 1])
@@ -271,6 +304,9 @@ def _render_record_detail(record: dict) -> None:
         passed = result.get("screening_passed")
         st.write(f"자격 필터: {'✅ 통과' if passed else '🚫 ' + str(result.get('screening_reason', '-'))}")
         st.write(f"분기: {result.get('branch', '-')}")
+        review = _effective_review(record)
+        if review.get("updated_at"):
+            st.caption(f"검토 기록: {review.get('updated_at')} · {review.get('note', '')}")
         fail_n = failed_outbox_count(record)
         if fail_n:
             st.error(f"실패 outbox {fail_n}건")
@@ -315,6 +351,7 @@ def _clear_recruiter_ui_state() -> None:
         "retry_record_select",
         "instant_record_select",
         "instant_action_select",
+        "final_review_select",
     ):
         st.session_state.pop(key, None)
     for key in list(st.session_state.keys()):
@@ -393,7 +430,7 @@ def _sim_llm_fn(_prompt: str) -> str:
 
 
 def _send_scheduled_now(row: list, webhook_url: str) -> tuple[bool, str]:
-    """예약 메일(outbox_scheduled 행)을 Delay/Notion 게이트 없이 즉시 Gmail 큐로 보낸다.
+    """예약 메일(outbox_scheduled 행)을 Delay/Zapier 대기 없이 즉시 발송한다.
 
     scheduled row: timestamp | send_after_iso | to | subject | body | candidate_name
     email row:     timestamp | to | subject | body | from_name
@@ -405,7 +442,7 @@ def _send_scheduled_now(row: list, webhook_url: str) -> tuple[bool, str]:
         row[4] if len(row) > 4 else "",
         "채용팀",
     ]
-    return post_to_gas({"target": "outbox_email", "row": email_row}, webhook_url)
+    return post_to_gas({"target": "send_email_now", "row": email_row}, webhook_url)
 
 
 MANUAL_OUTBOX_TARGETS = [
@@ -455,6 +492,7 @@ def render_dashboard(records: list[dict]) -> None:
                     "이름": payload.get("candidate_name", ""),
                     "포지션": payload.get("position", ""),
                     "채용 의견": _opinion_badge(payload.get("hiring_opinion")),
+                    "최종 검토": _review_badge(_effective_review(record)),
                     "자격": "✅" if result.get("screening_passed") else "🚫",
                     "outbox 실패": failed_outbox_count(record),
                 }
@@ -500,6 +538,7 @@ def render_interviews(records: list[dict]) -> None:
                 "학점": payload.get("gpa", ""),
                 "적합도": payload.get("fit_level", ""),
                 "채용 의견": _opinion_badge(payload.get("hiring_opinion")),
+                "최종 검토": _review_badge(_effective_review(record)),
                 "자격": "✅" if result.get("screening_passed") else "🚫",
                 "분기": result.get("branch", ""),
                 "outbox 실패": failed_outbox_count(record),
@@ -517,6 +556,115 @@ def render_interviews(records: list[dict]) -> None:
     _render_record_detail(selected)
 
 
+def render_final_review_queue(records: list[dict]) -> None:
+    cfg = load_pipeline_config()
+    review_records = [
+        record
+        for record in records
+        if (record.get("payload") or {}).get("hiring_opinion") == "추천"
+        and (record.get("pipeline_result") or {}).get("screening_passed")
+    ]
+
+    st.markdown("**최종 승인 큐 (Human-in-the-loop)**")
+    st.caption("AI가 추천한 후보자도 관리자가 승인해야 최종 합격 메일을 보낼 수 있습니다.")
+
+    if not review_records:
+        st.info("최종 승인 대기 후보자가 없습니다.")
+        return
+
+    pending_count = sum(
+        1
+        for record in review_records
+        if _effective_review(record).get("status") == "pending"
+    )
+    sent_count = sum(
+        1
+        for record in review_records
+        if _effective_review(record).get("status") == "approved_sent"
+    )
+    rejected_count = sum(
+        1
+        for record in review_records
+        if _effective_review(record).get("status") == "rejected_by_admin"
+    )
+
+    col_pending, col_sent, col_rejected = st.columns(3)
+    col_pending.metric("승인 대기", pending_count)
+    col_sent.metric("승인/발송", sent_count)
+    col_rejected.metric("반려", rejected_count)
+
+    st.dataframe(
+        [
+            {
+                "상태": _review_badge(_effective_review(record)),
+                "이름": (record.get("payload") or {}).get("candidate_name", ""),
+                "포지션": (record.get("payload") or {}).get("position", ""),
+                "이메일": (record.get("payload") or {}).get("candidate_email", ""),
+                "종합 점수": ((record.get("payload") or {}).get("scores") or {}).get("overall", ""),
+                "예약 메일": "있음" if _scheduled_action_row(record) else "없음",
+            }
+            for record in review_records
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    selected = st.selectbox(
+        "검토할 추천 후보자",
+        options=review_records,
+        format_func=lambda r: f"{_review_badge(_effective_review(r))} | {_format_record_label(r)}",
+        key="final_review_select",
+    )
+    payload = selected.get("payload") or {}
+    review = _effective_review(selected)
+    scheduled_row = _scheduled_action_row(selected)
+
+    st.markdown(
+        f"**{payload.get('candidate_name', '-')}** · "
+        f"{payload.get('position', '-')} · "
+        f"{payload.get('candidate_email', '-')}"
+    )
+    st.write(payload.get("hiring_recommendation_reason") or payload.get("summary") or "검토 사유가 없습니다.")
+    if review.get("updated_at"):
+        st.caption(f"최근 검토: {_review_badge(review)} · {review.get('updated_at')} · {review.get('note', '')}")
+
+    review_note = st.text_area(
+        "관리자 메모",
+        value=review.get("note", ""),
+        placeholder="승인/반려 사유를 남기면 발표 때 의사결정 로그를 보여주기 좋습니다.",
+        key=f"review_note_{selected['record_id']}",
+        height=80,
+    )
+
+    approve_col, hold_col, reject_col = st.columns(3)
+    with approve_col:
+        if st.button("✅ 승인하고 합격 메일 발송", type="primary", use_container_width=True):
+            if not cfg["webhook_url"]:
+                st.error("GAS_WEBHOOK_URL이 설정되지 않아 메일 큐를 보낼 수 없습니다.")
+            elif not scheduled_row:
+                st.error("이 후보자에는 예약 합격 메일(outbox_scheduled)이 없습니다.")
+            else:
+                ok, msg = _send_scheduled_now(scheduled_row, cfg["webhook_url"])
+                status = "approved_sent" if ok else "approved_send_failed"
+                note = f"메일 발송 성공: {msg}" if ok else f"메일 발송 실패: {msg}"
+                update_review_status(selected["record_id"], status, note=note, reviewer="admin")
+                if ok:
+                    st.success("관리자 승인 완료. 합격 메일을 즉시 발송했습니다.")
+                else:
+                    st.error(f"승인은 기록했지만 발송에 실패했습니다: {msg}")
+                st.rerun()
+    with hold_col:
+        if st.button("🟡 추가 보류", use_container_width=True):
+            update_review_status(selected["record_id"], "held_by_admin", note=review_note, reviewer="admin")
+            st.success("추가 보류 상태로 저장했습니다.")
+            st.rerun()
+    with reject_col:
+        if st.button("🛑 관리자 반려", use_container_width=True):
+            update_review_status(selected["record_id"], "rejected_by_admin", note=review_note, reviewer="admin")
+            st.success("관리자 반려 상태로 저장했습니다.")
+            st.rerun()
+
+
 def render_outbox(records: list[dict]) -> None:
     st.markdown("### 알림 · 파이프라인")
     if not records:
@@ -525,6 +673,9 @@ def render_outbox(records: list[dict]) -> None:
 
     failed_records = [record for record in records if failed_outbox_count(record) > 0]
     st.caption("재전송 시 면접 기록은 중복 저장되지 않고, 실패한 알림만 다시 보냅니다.")
+
+    render_final_review_queue(records)
+    st.divider()
 
     filtered = _render_record_filters(records, "ob")
     if not filtered:
@@ -707,7 +858,7 @@ def render_simulator(records: list[dict]) -> None:
                 if st.button("📨 지금 즉시 발송 (예약/승인 생략)", type="primary", use_container_width=True):
                     ok, msg = _send_scheduled_now(row, cfg["webhook_url"])
                     if ok:
-                        st.success(f"outbox_email로 즉시 발송 큐잉 완료 — {msg}")
+                        st.success(f"즉시 발송 완료 — {msg}")
                     else:
                         st.error(f"전송 실패: {msg}")
             else:
