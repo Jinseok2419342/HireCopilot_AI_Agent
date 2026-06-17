@@ -37,6 +37,37 @@ function authorizeHireCopilot_() {
   MailApp.getRemainingDailyQuota();
 }
 
+function doGet(e) {
+  try {
+    var params = e ? (e.parameter || {}) : {};
+    var action = params.action || "get_interviews";
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+
+    if (action === "get_interviews") {
+      var sheet = null;
+      for (var i = 0; i < INTERVIEWS_ALIASES.length; i++) {
+        sheet = ss.getSheetByName(INTERVIEWS_ALIASES[i]);
+        if (sheet) break;
+      }
+      if (!sheet) {
+        return jsonResponse_({ result: "error", message: "interviews sheet not found" });
+      }
+      var values = sheet.getDataRange().getValues();
+      if (values.length <= 1) {
+        return jsonResponse_({ result: "success", rows: [] });
+      }
+      var rows = values.slice(1).map(function(row) {
+        return row.map(function(cell) { return String(cell); });
+      });
+      return jsonResponse_({ result: "success", rows: rows });
+    }
+
+    return jsonResponse_({ result: "error", message: "unknown action: " + action });
+  } catch (err) {
+    return jsonResponse_({ result: "error", message: err.toString() });
+  }
+}
+
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);

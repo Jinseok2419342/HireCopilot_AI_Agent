@@ -13,6 +13,9 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+import requests
+from dotenv import load_dotenv
+
 from pipeline import OutboxAction, PipelineResult
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -115,6 +118,70 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
     return records
 
 
+def _sheet_row_to_payload(row: list) -> dict:
+    """19열 interviews 시트 행을 payload dict로 변환한다."""
+    def _cell(idx: int) -> str:
+        return str(row[idx]).strip() if idx < len(row) else ""
+
+    overall = _cell(10)
+    try:
+        overall_v: Any = float(overall) if overall else ""
+    except (ValueError, TypeError):
+        overall_v = overall
+
+    return {
+        "timestamp": _cell(0),
+        "candidate_name": _cell(1),
+        "candidate_email": _cell(2),
+        "position": _cell(3),
+        "degree": _cell(4),
+        "gpa": _cell(5),
+        "experience": _cell(6),
+        "fit_level": _cell(7),
+        "hiring_opinion": _cell(8),
+        "hiring_recommendation_reason": _cell(9),
+        "scores": {
+            "overall": overall_v,
+            "culture_fit": _cell(11),
+            "customer_response": _cell(12),
+            "ownership": _cell(13),
+            "communication": _cell(14),
+            "learning_agility": _cell(15),
+        },
+        "summary": _cell(16),
+        "recommended_next_step": _cell(17),
+        "transcript": _cell(18),
+    }
+
+
+def _fetch_records_from_gas(webhook_url: str) -> list[dict[str, Any]]:
+    """GAS doGet에서 interviews 시트를 읽어 레코드 목록으로 변환한다.
+
+    로컬 JSONL이 없는 클라우드 환경(Streamlit Community Cloud 등)에서 폴백으로 사용.
+    pipeline_result 상세 정보는 없지만 면접 결과는 모두 조회된다.
+    """
+    try:
+        r = requests.get(webhook_url, params={"action": "get_interviews"}, timeout=15)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        if data.get("result") != "success":
+            return []
+        rows = data.get("rows") or []
+        records = []
+        for row in rows:
+            if not any(str(cell).strip() for cell in row):
+                continue
+            payload = _sheet_row_to_payload(row)
+            if not payload.get("candidate_email"):
+                continue
+            record = build_interview_record(payload, None)
+            records.append(record)
+        return records
+    except Exception:
+        return []
+
+
 def _normalize_pipeline_log_result(record: dict[str, Any]) -> None:
     """pipeline_log는 Zap/outbox 대상이 아니므로 과거 실패 기록을 UI에서 성공 처리한다."""
     result = record.get("pipeline_result")
@@ -177,6 +244,17 @@ def list_interview_records(
     path: str = DEFAULT_STORE_PATH,
 ) -> list[dict]:
     records = _read_jsonl(path)
+
+    # 클라우드 환경(Streamlit Community Cloud 등): 로컬 파일이 없으면 GAS에서 직접 읽는다
+    if not records:
+        load_dotenv(override=True)
+        gas_url = (
+            os.getenv("GAS_WEBHOOK_URL", "").strip()
+            or os.getenv("ZAPIER_WEBHOOK_URL", "").strip()
+        )
+        if gas_url:
+            records = _fetch_records_from_gas(gas_url)
+
     records.sort(
         key=lambda record: (
             record.get("payload", {}).get("timestamp")
