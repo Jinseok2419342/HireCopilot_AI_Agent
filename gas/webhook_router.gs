@@ -14,6 +14,7 @@
  *   outbox_docs     → Zap: Google Docs Insert Text
  *   outbox_zoom     → Zap: Zoom Create Meeting
  *   outbox_scheduled  Zap: Delay Until + Notion 체크 확인 + Gmail (HITL 최종 합격)
+ *   send_email_now  즉시 Gmail/MailApp 발송 (Zapier 폴링 대기 없음)
  *   pipeline_log    파이프라인 로그 (Zap 불필요)
  *
  * POST JSON:
@@ -25,6 +26,16 @@
 var SPREADSHEET_ID = "1swaf7dyRsVRxepLJAXVoPO3YRNV0aPYmcBLL4_tPnbE";
 
 var INTERVIEWS_ALIASES = ["interviews", "Sheet1", "시트1"];
+
+/**
+ * Apps Script 편집기에서 이 함수를 한 번 실행하고 권한을 승인하세요.
+ * 웹앱 POST 요청은 권한 팝업을 띄울 수 없어서, MailApp 권한은 배포자가
+ * 편집기에서 먼저 승인해야 합니다.
+ */
+function authorizeHireCopilot_() {
+  SpreadsheetApp.openById(SPREADSHEET_ID).getName();
+  MailApp.getRemainingDailyQuota();
+}
 
 function doPost(e) {
   try {
@@ -42,6 +53,10 @@ function doPost(e) {
       return jsonResponse_({ result: "error", message: "target and row required" });
     }
 
+    if (target === "send_email_now") {
+      return sendEmailNow_(row);
+    }
+
     var sheet = getOrCreateSheet_(ss, target);
     sheet.appendRow(normalizeRow_(row));
 
@@ -49,6 +64,27 @@ function doPost(e) {
   } catch (err) {
     return jsonResponse_({ result: "error", message: err.toString() });
   }
+}
+
+function sendEmailNow_(row) {
+  row = normalizeRow_(row);
+  var to = row[1] || "";
+  var subject = row[2] || "";
+  var body = row[3] || "";
+  var fromName = row[4] || "채용팀";
+
+  if (!to || !subject || !body) {
+    return jsonResponse_({ result: "error", message: "to, subject, body required" });
+  }
+
+  MailApp.sendEmail({
+    to: to,
+    subject: subject,
+    htmlBody: body,
+    name: fromName
+  });
+
+  return jsonResponse_({ result: "success", target: "send_email_now", sent: true, to: to });
 }
 
 function buildInterviewRow_(data) {
@@ -122,4 +158,4 @@ var HEADERS_ = {
   outbox_scheduled: ["timestamp", "send_after_iso", "to", "subject", "body", "candidate_name"],
   pipeline_log: ["timestamp", "candidate_name", "branch", "screening", "detail"]
 };
-
+

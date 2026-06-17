@@ -78,6 +78,21 @@ def build_interview_record(payload: dict, result: PipelineResult | None) -> dict
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "payload": payload,
         "pipeline_result": pipeline_result_to_dict(result),
+        "review": _initial_review_state(payload, result),
+    }
+
+
+def _initial_review_state(payload: dict, result: PipelineResult | None) -> dict:
+    needs_review = (
+        payload.get("hiring_opinion") == "추천"
+        and result is not None
+        and result.screening_passed
+    )
+    return {
+        "status": "pending" if needs_review else "not_required",
+        "note": "",
+        "reviewer": "",
+        "updated_at": "",
     }
 
 
@@ -121,6 +136,8 @@ def save_interview_record(
     replaced = False
     for i, existing in enumerate(records):
         if existing.get("record_id") == record["record_id"]:
+            if existing.get("review"):
+                record["review"] = existing["review"]
             records[i] = record
             replaced = True
             break
@@ -161,6 +178,29 @@ def update_pipeline_result(
         if record.get("record_id") == record_id:
             record["recorded_at"] = datetime.now(timezone.utc).isoformat()
             record["pipeline_result"] = pipeline_result_to_dict(result)
+            _write_jsonl(records, path)
+            return record
+    return None
+
+
+def update_review_status(
+    record_id: str,
+    status: str,
+    *,
+    note: str = "",
+    reviewer: str = "admin",
+    path: str = DEFAULT_STORE_PATH,
+) -> dict | None:
+    records = _read_jsonl(path)
+    for record in records:
+        if record.get("record_id") == record_id:
+            record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+            record["review"] = {
+                "status": status,
+                "note": note,
+                "reviewer": reviewer,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
             _write_jsonl(records, path)
             return record
     return None
