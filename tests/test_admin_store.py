@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from admin_store import (
+    candidate_priority_key,
     failed_outbox_count,
     fallback_priority_report,
     list_interview_records,
@@ -173,6 +174,20 @@ class TestAdminStore(unittest.TestCase):
 
         self.assertIn("김추천", report)
         self.assertIn("먼저 확인할 후보자", report)
+
+    def test_candidate_priority_prefers_recommended_over_hold(self):
+        recommended = {
+            "payload": {**_payload(candidate_name="추천", hiring_opinion="추천"), "scores": {"overall": 4.1}},
+            "pipeline_result": {"screening_passed": True, "action_results": []},
+        }
+        hold = {
+            "payload": {**_payload(candidate_name="보류", hiring_opinion="보류"), "scores": {"overall": 4.9}},
+            "pipeline_result": {"screening_passed": True, "action_results": []},
+        }
+
+        ranked = sorted([hold, recommended], key=candidate_priority_key)
+
+        self.assertEqual(ranked[0]["payload"]["candidate_name"], "추천")
 
     def test_update_review_status_and_preserve_on_upsert(self):
         with tempfile.TemporaryDirectory() as tmp:
