@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>HireCopilot</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body {
+  font-family: -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+  background: #0d1117;
+  color: #e6edf3;
+}
+
+/* ── Nav ── */
+.nav-btn {
+  position: fixed; top: 50%; transform: translateY(-50%);
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+  color: #e6edf3; width: 52px; height: 52px; border-radius: 50%;
+  font-size: 22px; cursor: pointer; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .2s;
+}
+.nav-btn:hover { background: rgba(255,255,255,0.16); }
+.nav-btn:disabled { opacity: 0.15; cursor: default; }
+#prev-btn { left: 20px; }
+#next-btn { right: 20px; }
+#counter {
+  position: fixed; bottom: 22px; right: 28px;
+  font-size: 14px; color: rgba(255,255,255,0.3); z-index: 100;
+}
+#progress {
+  position: fixed; bottom: 0; left: 0; height: 3px;
+  background: #6366f1; transition: width .4s; z-index: 100;
+}
+
+/* ── Slides ── */
+.deck { width: 100%; height: 100vh; position: relative; }
+.slide {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+  padding: 52px 90px;
+  opacity: 0; transform: translateX(50px);
+  transition: opacity .35s, transform .35s;
+  pointer-events: none;
+}
+.slide.active { opacity: 1; transform: translateX(0); pointer-events: all; }
+.slide.exit   { opacity: 0; transform: translateX(-50px); }
+.slide.left   { align-items: flex-start; }
+
+/* ── Type ── */
+.tag {
+  font-size: 12px; letter-spacing: 3px; text-transform: uppercase;
+  font-weight: 700; margin-bottom: 14px;
+}
+h1   { font-size: 66px; font-weight: 800; line-height: 1.12; }
+h2   { font-size: 44px; font-weight: 750; line-height: 1.2; }
+.sub { font-size: 20px; color: #64748b; margin-top: 12px; }
+
+.c-ind { color: #818cf8; }
+.c-amb { color: #fbbf24; }
+.c-grn { color: #34d399; }
+.c-red { color: #f87171; }
+.c-org { color: #fb923c; }
+
+/* ── Badges ── */
+.badges { display: flex; gap: 12px; margin-top: 36px; flex-wrap: wrap; justify-content: center; }
+.badge  { padding: 8px 20px; border-radius: 24px; font-size: 15px; font-weight: 600; border: 1px solid; }
+.bg  { color: #34d399; border-color: #065f46; background: rgba(6,95,70,.15); }
+.bp  { color: #60a5fa; border-color: #1d4ed8; background: rgba(29,78,216,.12); }
+.bz  { color: #fb923c; border-color: #c2410c; background: rgba(194,65,12,.12); }
+
+/* ── Full-width image ── */
+.big-img {
+  width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  margin-top: 20px;
+  display: block;
+}
+
+/* ── Side-by-side layout ── */
+.halves {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 36px;
+  width: 100%;
+  margin-top: 22px;
+  align-items: start;
+}
+.half-img {
+  width: 100%;
+  max-height: 58vh;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  display: block;
+}
+/* ── Problem ── */
+.prob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; width: 100%; margin-top: 30px; }
+.pcard {
+  background: rgba(239,68,68,.07); border: 1px solid rgba(239,68,68,.2);
+  border-radius: 14px; padding: 26px;
+}
+.pcard .ico { font-size: 32px; margin-bottom: 10px; }
+.pcard h3  { font-size: 19px; color: #f87171; margin-bottom: 6px; }
+.pcard p   { font-size: 15px; color: #94a3b8; line-height: 1.6; }
+
+/* ── After list (in halves) ── */
+.after-col { display: flex; flex-direction: column; gap: 0; }
+.after-col h3 { font-size: 19px; color: #34d399; margin-bottom: 14px; }
+.arow {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.arow:last-child { border-bottom: none; }
+.adot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.arow span { font-size: 16px; color: #cbd5e1; }
+.good-box {
+  margin-top: 16px; background: rgba(34,197,94,.07); border: 1px solid rgba(34,197,94,.2);
+  border-radius: 10px; padding: 14px 16px;
+}
+.good-box p { font-size: 15px; color: #86efac; line-height: 1.8; }
+
+/* ── Zapier table ── */
+.ztable { width: 100%; margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+.zrow {
+  display: grid; grid-template-columns: 200px 32px 100px 32px 1fr 190px;
+  align-items: center;
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 11px; padding: 15px 18px;
+}
+.zrow.sp { background: rgba(245,158,11,.06); border-color: rgba(245,158,11,.2); }
+.ztag {
+  font-family: monospace; font-size: 14px; color: #34d399;
+  background: rgba(52,211,153,.1); padding: 4px 10px; border-radius: 6px; display: inline-block;
+}
+.zarr { text-align: center; color: #2d3748; font-size: 18px; }
+.zpill {
+  background: rgba(249,115,22,.15); border: 1px solid rgba(249,115,22,.3);
+  color: #fb923c; font-size: 13px; font-weight: 700;
+  padding: 4px 12px; border-radius: 20px; display: inline-block;
+}
+.zact  { font-size: 16px; color: #e2e8f0; }
+.zwhen { font-size: 13px; color: #64748b; text-align: right; }
+.znote {
+  margin-top: 16px; background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.2);
+  border-radius: 10px; padding: 14px 20px; display: flex; align-items: center; gap: 12px;
+}
+.znote p { font-size: 15px; color: #a5b4fc; }
+
+/* ── Steps (for interview) ── */
+.steps { display: flex; flex-direction: column; gap: 20px; }
+.step  { display: flex; gap: 16px; align-items: flex-start; }
+.snum {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(99,102,241,.2); border: 1px solid rgba(99,102,241,.4);
+  color: #818cf8; font-size: 16px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.step h3 { font-size: 18px; color: #e2e8f0; margin-bottom: 4px; }
+.step p  { font-size: 15px; color: #94a3b8; line-height: 1.6; }
+.rtags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
+.rtag {
+  background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.25);
+  color: #a5b4fc; font-size: 13px; padding: 4px 12px; border-radius: 20px;
+}
+
+/* ── Pipeline ── */
+.pipe { display: flex; gap: 14px; align-items: stretch; width: 100%; margin-top: 28px; }
+.pblk { flex: 1; border-radius: 14px; padding: 22px 18px; border: 1px solid; }
+.pblk.pf { border-color: rgba(59,130,246,.3);  background: rgba(59,130,246,.07); }
+.pblk.pb { border-color: rgba(245,158,11,.3);  background: rgba(245,158,11,.07); }
+.pblk.po { border-color: rgba(34,197,94,.3);   background: rgba(34,197,94,.07); }
+.pblk h3 { font-size: 18px; margin-bottom: 14px; }
+.pblk.pf h3 { color: #60a5fa; }
+.pblk.pb h3 { color: #fbbf24; }
+.pblk.po h3 { color: #34d399; }
+.parr { color: #2d3748; font-size: 28px; display: flex; align-items: center; flex-shrink: 0; }
+.clist { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.clist li { font-size: 15px; color: #94a3b8; display: flex; gap: 8px; align-items: flex-start; }
+.clist li::before { content: "✓"; color: #34d399; font-size: 13px; padding-top: 2px; flex-shrink: 0; }
+.bitems { display: flex; flex-direction: column; gap: 8px; }
+.bitem { padding: 10px 14px; border-radius: 8px; }
+.bitem h4 { font-size: 16px; margin-bottom: 2px; }
+.bitem p  { font-size: 13px; opacity: .75; }
+.bitem.rec  { background: rgba(34,197,94,.1); color: #34d399; }
+.bitem.hold { background: rgba(245,158,11,.1); color: #fbbf24; }
+.bitem.rej  { background: rgba(239,68,68,.1);  color: #f87171; }
+.otags { display: flex; flex-direction: column; gap: 6px; }
+.otag { font-family: monospace; font-size: 13px; color: #34d399; background: rgba(52,211,153,.08); padding: 6px 10px; border-radius: 6px; }
+
+/* ── Admin feature list ── */
+.acards { display: flex; flex-direction: column; gap: 14px; }
+.acard {
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px; padding: 18px 20px;
+  display: flex; gap: 14px; align-items: flex-start;
+}
+.acard .ico { font-size: 26px; flex-shrink: 0; }
+.acard h3   { font-size: 17px; color: #e2e8f0; margin-bottom: 3px; }
+.acard p    { font-size: 14px; color: #64748b; line-height: 1.5; }
+
+/* ── Key points ── */
+.kgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; margin-top: 32px; }
+.kcard { border-radius: 14px; padding: 26px; border: 1px solid; }
+.kcard.k1 { border-color: rgba(99,102,241,.3);  background: rgba(99,102,241,.07); }
+.kcard.k2 { border-color: rgba(249,115,22,.3);  background: rgba(249,115,22,.07); }
+.kcard.k3 { border-color: rgba(34,197,94,.3);   background: rgba(34,197,94,.07); }
+.kcard.k4 { border-color: rgba(168,85,247,.3);  background: rgba(168,85,247,.07); }
+.kcard .kn { font-size: 12px; letter-spacing: 2px; font-weight: 700; margin-bottom: 10px; }
+.kcard.k1 .kn { color: #818cf8; }
+.kcard.k2 .kn { color: #fb923c; }
+.kcard.k3 .kn { color: #34d399; }
+.kcard.k4 .kn { color: #c084fc; }
+.kcard h3 { font-size: 20px; margin-bottom: 8px; }
+.kcard p  { font-size: 15px; color: #94a3b8; line-height: 1.6; }
+
+/* ── Demo ── */
+#s9 { background: radial-gradient(ellipse 70% 50% at 50% 50%, #1a1f3a 0%, #0d1117 70%); text-align: center; }
+.dsteps { display: flex; gap: 14px; margin-top: 40px; flex-wrap: wrap; justify-content: center; }
+.ds {
+  background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+  border-radius: 12px; padding: 14px 20px; font-size: 16px; color: #94a3b8;
+  display: flex; align-items: center; gap: 10px;
+}
+.dsn {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(99,102,241,.3); color: #818cf8;
+  font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+</style>
+</head>
+<body>
+
+<button class="nav-btn" id="prev-btn" onclick="go(-1)">&#8592;</button>
+<button class="nav-btn" id="next-btn" onclick="go(1)">&#8594;</button>
+<div id="counter">1 / 9</div>
+<div id="progress"></div>
+
+<div class="deck">
+
+<!-- 1. 표지 -->
+<section class="slide" id="s1">
+  <div class="tag c-ind">HireCopilot</div>
+  <h1>AI가 면접하고<br><span class="c-ind">코드가 판단하고</span><br><span class="c-amb">Zapier가 연결한다</span></h1>
+  <p class="sub">AI 기반 채용 자동화 시스템 — 면접부터 합격 안내까지 원스톱</p>
+  <div class="badges">
+    <div class="badge bg">GPT-4o-mini</div>
+    <div class="badge bp">Python · Streamlit</div>
+    <div class="badge bz">Zapier · Google Sheets</div>
+  </div>
+  <div style="margin-top:32px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 22px;border-radius:30px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);">
+      <span style="font-size:18px;">👤</span><span style="font-size:16px;color:#cbd5e1;font-weight:600;">장진석</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 22px;border-radius:30px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);">
+      <span style="font-size:18px;">👤</span><span style="font-size:16px;color:#cbd5e1;font-weight:600;">고지호</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 22px;border-radius:30px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);">
+      <span style="font-size:18px;">👤</span><span style="font-size:16px;color:#cbd5e1;font-weight:600;">박채원</span>
+    </div>
+  </div>
+</section>
+
+<!-- 2. 문제 -->
+<section class="slide left" id="s2">
+  <div class="tag c-red">Problem</div>
+  <h2>기존: <span class="c-red">Zapier 하나에 모든 것을</span></h2>
+  <div class="prob-grid">
+    <div class="pcard">
+      <div class="ico">🔀</div>
+      <h3>로직이 Zap 안에</h3>
+      <p>분기(Paths)·필터·AI 호출이 모두 Zapier 안에 얽혀있음</p>
+    </div>
+    <div class="pcard">
+      <div class="ico">🐛</div>
+      <h3>테스트 불가</h3>
+      <p>Zap 안 로직은 단위 테스트 작성 불가. 디버깅이 고통</p>
+    </div>
+    <div class="pcard">
+      <div class="ico">📦</div>
+      <h3>앱 하나 바꾸면 전체 재편집</h3>
+      <p>Gmail·Slack·Notion·Zoom이 하나의 Zap에 묶여 결합도 높음</p>
+    </div>
+    <div class="pcard">
+      <div class="ico">💸</div>
+      <h3>Zapier AI 비용 상승</h3>
+      <p>2차 질문 생성·메일 예약 로직까지 Zapier에 의존</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3. Before → After -->
+<section class="slide left" id="s3">
+  <div class="tag c-grn">Before → After</div>
+  <h2>통짜 Zapier <span style="color:#334155">→</span> 코드 + 접착제 Zapier</h2>
+  <div class="halves">
+    <!-- Before: 이미지가 주인공 -->
+    <div>
+      <p style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:#f87171;font-weight:700;margin-bottom:10px;">BEFORE</p>
+      <img src="img/zapier_before.png" class="half-img" alt="기존 Zapier">
+      <div style="margin-top:10px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:12px 16px;">
+        <p style="font-size:14px;color:#fca5a5;line-height:1.8;">✗ 로직이 Zapier 안에 — 테스트 불가<br>✗ 한 곳에 얽혀 수정이 어려움</p>
+      </div>
+    </div>
+    <!-- After: 구조 설명 -->
+    <div class="after-col">
+      <p style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:#34d399;font-weight:700;margin-bottom:10px;">AFTER</p>
+      <div class="arow"><div class="adot" style="background:#818cf8"></div><span><b style="color:#818cf8">Streamlit</b> — 면접 UI</span></div>
+      <div class="arow"><div class="adot" style="background:#60a5fa"></div><span><b style="color:#60a5fa">Python</b> — 필터·분기·큐잉 (테스트 가능)</span></div>
+      <div class="arow"><div class="adot" style="background:#34d399"></div><span><b style="color:#34d399">GAS + Sheets</b> — outbox 시트에 행 추가</span></div>
+      <div class="arow"><div class="adot" style="background:#fb923c"></div><span><b style="color:#fb923c">Zapier × 6</b> — New Row → 앱 1:1 연결만</span></div>
+      <div class="good-box">
+        <p>✓ 로직은 Python — unittest 40개 완료<br>✓ Zap 하나당 앱 하나 — 독립 수정<br>✓ Zapier 안에 Filter / AI 없음</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4. Zapier 접착제 -->
+<section class="slide left" id="s4">
+  <div class="tag c-amb">Zapier as Glue</div>
+  <h2>Zapier = <span class="c-amb">연결만</span>. 로직 없음. Zap 1개 = 앱 1개</h2>
+  <div class="ztable">
+    <div class="zrow">
+      <span class="ztag">outbox_email</span><span class="zarr">→</span><span class="zpill">Zap 1</span><span class="zarr">→</span>
+      <span class="zact">📧 Gmail Send Email</span><span class="zwhen">비추천 탈락 안내</span>
+    </div>
+    <div class="zrow">
+      <span class="ztag">outbox_slack</span><span class="zarr">→</span><span class="zpill">Zap 2</span><span class="zarr">→</span>
+      <span class="zact">💬 Slack DM</span><span class="zwhen">추천·보류 관리자 알림</span>
+    </div>
+    <div class="zrow">
+      <span class="ztag">outbox_notion</span><span class="zarr">→</span><span class="zpill">Zap 3</span><span class="zarr">→</span>
+      <span class="zact">📝 Notion Create Item</span><span class="zwhen">후보자 DB 등록</span>
+    </div>
+    <div class="zrow">
+      <span class="ztag">outbox_zoom</span><span class="zarr">→</span><span class="zpill">Zap 4</span><span class="zarr">→</span>
+      <span class="zact">📹 Zoom Create Meeting</span><span class="zwhen">보류 → 2차 면접 일정</span>
+    </div>
+    <div class="zrow">
+      <span class="ztag">outbox_docs</span><span class="zarr">→</span><span class="zpill">Zap 5</span><span class="zarr">→</span>
+      <span class="zact">📄 Google Docs Append</span><span class="zwhen">LLM 2차 질문 문서</span>
+    </div>
+    <div class="zrow sp">
+      <span class="ztag">outbox_scheduled</span><span class="zarr">→</span>
+      <span class="zpill" style="border-color:rgba(245,158,11,.5);color:#fbbf24;">Zap 6 ★</span><span class="zarr">→</span>
+      <span class="zact">⏱ Delay Until → Notion 체크 → Gmail</span><span class="zwhen">관리자 승인 후 합격 메일</span>
+    </div>
+  </div>
+  <div class="znote">
+    <span style="font-size:20px;">💡</span>
+    <p>모든 Zap의 Trigger는 <b>New Spreadsheet Row</b>. Zapier 안에 Filter · Paths · AI 없음.</p>
+  </div>
+</section>
+
+<!-- 5. AI 면접 -->
+<section class="slide left" id="s5">
+  <div class="tag c-ind">Feature 1 — AI 면접</div>
+  <h2>AI가 직접 한국어 면접 진행</h2>
+  <div class="halves">
+    <div class="steps">
+      <div class="step">
+        <div class="snum">1</div>
+        <div><h3>온보딩 폼</h3><p>이름·이메일·학력·경력·학점·포지션<br>포지션별 기준은 관리자가 설정</p></div>
+      </div>
+      <div class="step">
+        <div class="snum">2</div>
+        <div><h3>GPT 채팅 면접</h3><p>포지션 맞춤 프롬프트로 AI가 면접 진행</p></div>
+      </div>
+      <div class="step">
+        <div class="snum">3</div>
+        <div>
+          <h3>5개 루브릭 자동 채점</h3>
+          <div class="rtags">
+            <span class="rtag">문화적합도</span><span class="rtag">고객응대</span>
+            <span class="rtag">주인의식</span><span class="rtag">커뮤니케이션</span><span class="rtag">학습민첩성</span>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="snum">4</div>
+        <div><h3>hiring_opinion 자동 판정</h3><p>추천 / 보류 / 비추천 → 파이프라인 트리거</p></div>
+      </div>
+    </div>
+    <img src="img/app_screenshot.png" class="half-img" alt="면접 앱">
+  </div>
+</section>
+
+<!-- 6. 파이프라인 -->
+<section class="slide left" id="s6">
+  <div class="tag c-ind">Feature 2 — 파이프라인</div>
+  <h2>면접 종료 즉시 자동 실행</h2>
+  <div class="pipe">
+    <div class="pblk pf">
+      <h3>① 자격 필터</h3>
+      <ul class="clist">
+        <li>이메일 형식 검사</li>
+        <li>학점 커트라인 초과</li>
+        <li>학위 보유 여부</li>
+        <li>경력 필수 여부</li>
+      </ul>
+      <p style="margin-top:12px;font-size:13px;color:#475569;">관리자 콘솔에서 실시간 변경</p>
+    </div>
+    <div class="parr">→</div>
+    <div class="pblk pb">
+      <h3>② 분기</h3>
+      <div class="bitems">
+        <div class="bitem rec"><h4>✅ 추천</h4><p>Notion 등록 + 예약 합격 메일 + 알림</p></div>
+        <div class="bitem hold"><h4>🟡 보류</h4><p>알림 + LLM 2차 질문 + Zoom 생성</p></div>
+        <div class="bitem rej"><h4>❌ 비추천</h4><p>지원자에게 탈락 안내 메일</p></div>
+      </div>
+    </div>
+    <div class="parr">→</div>
+    <div class="pblk po">
+      <h3>③ outbox 큐잉</h3>
+      <div class="otags">
+        <div class="otag">outbox_email</div>
+        <div class="otag">outbox_slack</div>
+        <div class="otag">outbox_notion</div>
+        <div class="otag">outbox_docs</div>
+        <div class="otag">outbox_zoom</div>
+        <div class="otag">outbox_scheduled</div>
+      </div>
+      <p style="margin-top:10px;font-size:13px;color:#475569;">GAS → Sheets → Zapier 자동 감지</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7. 관리자 콘솔 -->
+<section class="slide left" id="s7">
+  <div class="tag c-ind">Feature 3 — 관리자 콘솔</div>
+  <h2>통합 관리자 콘솔</h2>
+  <div class="halves">
+    <div class="acards">
+      <div class="acard"><div class="ico">📊</div><div><h3>대시보드</h3><p>추천·보류·비추천 집계 + 최근 면접 목록</p></div></div>
+      <div class="acard"><div class="ico">🔁</div><div><h3>실패 outbox 재전송</h3><p>GAS 전송 실패만 선택 재전송 — 중복 방지</p></div></div>
+      <div class="acard"><div class="ico">⚡</div><div><h3>Zapier 연결 가이드</h3><p>outbox별 Trigger·Action·필드 매핑 제공</p></div></div>
+      <div class="acard"><div class="ico">⚙️</div><div><h3>채용 설정</h3><p>포지션·학점 기준·신입 제외 실시간 변경</p></div></div>
+    </div>
+    <img src="img/admin_screenshot.png" class="half-img" alt="관리자 콘솔">
+  </div>
+</section>
+
+<!-- 8. 핵심 특징 -->
+<section class="slide left" id="s8">
+  <div class="tag c-ind">Key Points</div>
+  <h2>왜 이 구조인가</h2>
+  <div class="kgrid">
+    <div class="kcard k1">
+      <div class="kn">POINT 01</div>
+      <h3>로직은 코드, 연결은 Zapier</h3>
+      <p>필터·분기·LLM은 Python. Zapier는 New Row → 앱 액션만. Zap 안에 복잡한 로직 없음.</p>
+    </div>
+    <div class="kcard k2">
+      <div class="kn">POINT 02</div>
+      <h3>Zap 1개 = 앱 1개</h3>
+      <p>Gmail Zap 수정이 Slack Zap과 무관. 앱 교체 시 해당 Zap만 변경.</p>
+    </div>
+    <div class="kcard k3">
+      <div class="kn">POINT 03</div>
+      <h3>테스트 가능한 파이프라인</h3>
+      <p>pipeline.py 단위 테스트 40개 완료. 로직 변경 즉시 검증 가능.</p>
+    </div>
+    <div class="kcard k4">
+      <div class="kn">POINT 04</div>
+      <h3>재시작 없이 기준 변경</h3>
+      <p>학점 커트라인·포지션 기준을 관리자 콘솔에서 실시간 변경. 코드 수정 불필요.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 9. 시연 -->
+<section class="slide" id="s9">
+  <div style="font-size:64px;margin-bottom:20px;">🎬</div>
+  <div class="tag c-ind">Live Demo</div>
+  <h2 style="font-size:54px;">지금부터 시연합니다</h2>
+  <p class="sub">AI 면접 → 파이프라인 자동 실행 → 관리자 콘솔 확인</p>
+  <div class="dsteps">
+    <div class="ds"><div class="dsn">1</div>지원자 온보딩 입력</div>
+    <div class="ds"><div class="dsn">2</div>GPT 채팅 면접 진행</div>
+    <div class="ds"><div class="dsn">3</div>5개 루브릭 평가 확인</div>
+    <div class="ds"><div class="dsn">4</div>Sheets outbox 확인</div>
+    <div class="ds"><div class="dsn">5</div>관리자 콘솔 확인</div>
+  </div>
+</section>
+
+</div>
+
+<script>
+const slides = document.querySelectorAll('.slide');
+const total = slides.length;
+let cur = 0;
+
+slides[0].classList.add('active');
+
+function go(dir) {
+  const next = cur + dir;
+  if (next < 0 || next >= total) return;
+  slides[cur].classList.remove('active');
+  slides[cur].classList.add('exit');
+  const ei = cur;
+  setTimeout(() => slides[ei].classList.remove('exit'), 400);
+  cur = next;
+  slides[cur].classList.add('active');
+  update();
+}
+
+function update() {
+  document.getElementById('counter').textContent = (cur+1) + ' / ' + total;
+  document.getElementById('progress').style.width = ((cur+1)/total*100) + '%';
+  document.getElementById('prev-btn').disabled = cur === 0;
+  document.getElementById('next-btn').disabled = cur === total-1;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); go(1); }
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); go(-1); }
+});
+
+update();
+</script>
+</body>
+</html>
