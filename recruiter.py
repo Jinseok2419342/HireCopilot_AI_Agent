@@ -6,6 +6,7 @@ HireCopilot - 통합 관리자 콘솔
 
 import json
 import os
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 
 import streamlit as st
@@ -33,7 +34,11 @@ load_dotenv(override=True)
 RECRUITER_PASSWORD = os.getenv("RECRUITER_PASSWORD", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe").strip() or "gpt-4o-transcribe"
 RECRUITER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recruiter_config.json")
+
+SUPPORTED_AUDIO_TYPES = ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"]
+MAX_AUDIO_UPLOAD_MB = 25
 
 DEFAULT_POSITIONS = [
     {"name": "Customer Success Associate (고객 성공 매니저)", "criteria": ""},
@@ -292,6 +297,122 @@ def generate_priority_report(records: list[dict], *, use_openai: bool = True) ->
         return f"{fallback_priority_report(records)}\n\n> OpenAI 리포트 생성 실패: {type(e).__name__}: {e}", "fallback_error"
 
 
+def _json_from_text(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def transcribe_audio_file(uploaded_file) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+    data = uploaded_file.getvalue()
+    size_mb = len(data) / (1024 * 1024)
+    if size_mb > MAX_AUDIO_UPLOAD_MB:
+        raise RuntimeError(f"오디오 파일은 {MAX_AUDIO_UPLOAD_MB}MB 이하만 업로드할 수 있습니다.")
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    audio = BytesIO(data)
+    audio.name = uploaded_file.name
+    transcript = client.audio.transcriptions.create(
+        model=OPENAI_TRANSCRIBE_MODEL,
+        file=audio,
+        language="ko",
+    )
+    return (getattr(transcript, "text", "") or "").strip()
+
+
+def _fallback_voice_review(record: dict, transcript: str) -> dict:
+    payload = record.get("payload") or {}
+    scores = payload.get("scores") or {}
+    existing = float(scores.get("overall") or 3.0)
+    transcript_len = len(transcript.strip())
+    bonus = 0.3 if transcript_len > 600 else 0.0
+    penalty = -0.4 if any(word in transcript for word in ("모르겠습니다", "잘 모르", "기억이 안")) else 0.0
+    score = max(1.0, min(5.0, round(existing + bonus + penalty, 1)))
+    if score >= 4.1:
+        recommendation = "추천"
+    elif score >= 3.2:
+        recommendation = "보류"
+    else:
+        recommendation = "비추천"
+    return {
+        "recommendation": recommendation,
+        "recommendation_score": int(round(score * 20)),
+        "overall_score": score,
+        "summary": "OpenAI 평가 없이 기존 1차 면접 점수와 추가 면접 전사 길이/불확실 표현을 기준으로 산출한 간이 평가입니다.",
+        "strengths": payload.get("strengths") or ["기존 면접에서 확인된 강점을 참고하세요."],
+        "risks": payload.get("concerns") or ["추가 면접 답변의 구체성과 근거를 사람이 확인하세요."],
+        "evidence": ["규칙 기반 fallback 평가라 직접 인용 근거는 제한적입니다."],
+        "followup_questions": [
+            "추가 면접 답변 중 가장 중요한 성과를 수치로 설명해 주세요.",
+            "모호했던 답변에 대해 실제 본인 역할과 의사결정 근거를 확인하세요.",
+        ],
+        "next_action": "기존 면접 평가와 전사 내용을 함께 검토한 뒤 최종 판단하세요.",
+    }
+
+
+def evaluate_voice_interview(record: dict, transcript: str, *, use_openai: bool = True) -> tuple[dict, str]:
+    if not transcript.strip():
+        return {"error": "전사 텍스트가 비어 있습니다."}, "empty"
+    if not use_openai or not OPENAI_API_KEY:
+        return _fallback_voice_review(record, transcript), "fallback"
+
+    payload = record.get("payload") or {}
+    prompt = f"""
+당신은 채용 담당자를 돕는 한국어 HR 평가자입니다.
+아래 1차 AI 면접 기록과 추가 면접 녹취록을 함께 보고 최종 추천도와 평가를 JSON으로 작성하세요.
+채용 결정은 사람이 하므로, 과장하지 말고 근거가 약하면 보류/추가 확인으로 표시하세요.
+
+반드시 JSON 객체만 반환하세요.
+필드:
+- recommendation: "추천" | "보류" | "비추천"
+- recommendation_score: 0~100 정수
+- overall_score: 1~5 숫자
+- summary: 한 문단 요약
+- strengths: 문자열 배열
+- risks: 문자열 배열
+- evidence: 추가 면접 녹취에서 근거가 되는 짧은 인용/요약 배열
+- followup_questions: 사람이 추가 확인할 질문 배열
+- next_action: 관리자 다음 액션 한 문장
+
+1차 면접 기록:
+{json.dumps(candidate_brief(record), ensure_ascii=False, indent=2)}
+
+1차 상세 요약:
+{json.dumps(payload, ensure_ascii=False, indent=2)[:6000]}
+
+추가 면접 녹취록:
+{transcript[:12000]}
+"""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "당신은 신중하고 근거 중심의 채용 평가자입니다."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        text = resp.choices[0].message.content or "{}"
+        return _json_from_text(text), "openai"
+    except Exception as e:
+        fallback = _fallback_voice_review(record, transcript)
+        fallback["openai_error"] = f"{type(e).__name__}: {e}"
+        return fallback, "fallback_error"
+
+
 def _unique_positions(records: list[dict]) -> list[str]:
     positions = sorted(
         {
@@ -457,6 +578,11 @@ def _clear_recruiter_ui_state() -> None:
         "instant_record_select",
         "instant_action_select",
         "final_review_select",
+        "voice_review_record_select",
+        "voice_review_transcript",
+        "voice_review_transcript_error",
+        "voice_review_eval",
+        "voice_review_eval_mode",
     ):
         st.session_state.pop(key, None)
     for key in list(st.session_state.keys()):
@@ -707,6 +833,131 @@ def render_ai_report(records: list[dict]) -> None:
         data=report,
         file_name="hirecopilot_priority_report.md",
         mime="text/markdown",
+        use_container_width=True,
+    )
+
+
+def render_voice_review(records: list[dict]) -> None:
+    st.markdown("### 추가 면접 음성 평가")
+    st.caption("추가 면접 녹음 파일을 업로드하면 기존 1차 면접 기록과 합쳐 추천도와 평가를 생성합니다.")
+
+    if not records:
+        st.info("먼저 지원자 면접 기록이 필요합니다.")
+        return
+
+    selected = st.selectbox(
+        "평가할 지원자",
+        options=records,
+        format_func=_format_record_label,
+        key="voice_review_record_select",
+    )
+    payload = selected.get("payload") or {}
+    st.write(
+        f"선택: **{payload.get('candidate_name', '-')}** · "
+        f"{payload.get('position', '-')} · {_opinion_badge(payload.get('hiring_opinion'))}"
+    )
+
+    uploaded = st.file_uploader(
+        "추가 면접 녹음 파일",
+        type=SUPPORTED_AUDIO_TYPES,
+        help=f"{', '.join(SUPPORTED_AUDIO_TYPES)} 형식, {MAX_AUDIO_UPLOAD_MB}MB 이하를 권장합니다.",
+    )
+    manual_transcript = st.text_area(
+        "전사 텍스트 직접 입력",
+        height=180,
+        placeholder="오디오 전사가 어렵거나 이미 받아쓴 내용이 있으면 여기에 붙여 넣으세요.",
+    )
+
+    use_openai_eval = st.checkbox("OpenAI로 평가 생성", value=bool(OPENAI_API_KEY))
+    col_transcribe, col_eval = st.columns(2)
+
+    if col_transcribe.button("오디오 전사", use_container_width=True, disabled=uploaded is None):
+        if uploaded is None:
+            st.warning("먼저 오디오 파일을 업로드하세요.")
+        else:
+            with st.spinner("오디오를 전사하는 중입니다..."):
+                try:
+                    transcript = transcribe_audio_file(uploaded)
+                    st.session_state["voice_review_transcript"] = transcript
+                    st.success("전사가 완료되었습니다.")
+                except Exception as e:
+                    st.session_state["voice_review_transcript_error"] = f"{type(e).__name__}: {e}"
+                    st.error(f"전사 실패: {type(e).__name__}: {e}")
+
+    transcript = manual_transcript.strip() or st.session_state.get("voice_review_transcript", "")
+    if transcript:
+        with st.expander("전사 내용", expanded=True):
+            st.text_area("전사 결과", value=transcript, height=220, key="voice_review_transcript_view")
+
+    if col_eval.button("추천도 평가 생성", type="primary", use_container_width=True):
+        if not transcript.strip():
+            st.warning("오디오 전사를 먼저 하거나 전사 텍스트를 입력하세요.")
+        else:
+            with st.spinner("추가 면접 평가를 생성하는 중입니다..."):
+                evaluation, mode = evaluate_voice_interview(selected, transcript, use_openai=use_openai_eval)
+                st.session_state["voice_review_eval"] = evaluation
+                st.session_state["voice_review_eval_mode"] = mode
+
+    evaluation = st.session_state.get("voice_review_eval")
+    if not evaluation:
+        return
+
+    mode = st.session_state.get("voice_review_eval_mode", "fallback")
+    if mode == "openai":
+        st.success(f"OpenAI 모델 `{OPENAI_MODEL}`로 평가했습니다.")
+    elif mode == "fallback_error":
+        st.warning("OpenAI 평가에 실패해 규칙 기반 평가를 표시합니다.")
+    elif mode == "fallback":
+        st.info("규칙 기반 평가를 표시합니다.")
+
+    if evaluation.get("error"):
+        st.error(evaluation["error"])
+        return
+
+    cols = st.columns(3)
+    cols[0].metric("추천 판단", evaluation.get("recommendation", "-"))
+    cols[1].metric("추천도", f"{evaluation.get('recommendation_score', '-')} / 100")
+    cols[2].metric("종합 점수", f"{evaluation.get('overall_score', '-')} / 5")
+
+    st.markdown("**요약**")
+    st.write(evaluation.get("summary", "-"))
+
+    col_s, col_r = st.columns(2)
+    with col_s:
+        st.markdown("**강점**")
+        for item in evaluation.get("strengths") or ["(기록 없음)"]:
+            st.markdown(f"- {item}")
+    with col_r:
+        st.markdown("**리스크**")
+        for item in evaluation.get("risks") or ["(기록 없음)"]:
+            st.markdown(f"- {item}")
+
+    st.markdown("**근거**")
+    for item in evaluation.get("evidence") or ["(기록 없음)"]:
+        st.markdown(f"- {item}")
+
+    st.markdown("**추가 확인 질문**")
+    for item in evaluation.get("followup_questions") or ["(기록 없음)"]:
+        st.markdown(f"- {item}")
+
+    st.markdown("**다음 액션**")
+    st.write(evaluation.get("next_action", "-"))
+
+    result_json = json.dumps(
+        {
+            "candidate": candidate_brief(selected),
+            "transcript": transcript,
+            "evaluation": evaluation,
+            "mode": mode,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    st.download_button(
+        "평가 결과 다운로드",
+        data=result_json,
+        file_name="voice_interview_evaluation.json",
+        mime="application/json",
         use_container_width=True,
     )
 
@@ -1235,6 +1486,7 @@ _NAV_ITEMS = [
     "대시보드",
     "지원자 관리",
     "AI 리포트",
+    "음성 평가",
     "알림/파이프라인",
     "테스트 도구",
     "설정",
@@ -1341,6 +1593,8 @@ elif page == "지원자 관리":
     render_interviews(records)
 elif page == "AI 리포트":
     render_ai_report(records)
+elif page == "음성 평가":
+    render_voice_review(records)
 elif page == "알림/파이프라인":
     render_outbox(records)
 elif page == "테스트 도구":
