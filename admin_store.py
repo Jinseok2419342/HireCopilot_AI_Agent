@@ -110,8 +110,31 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict):
+                _normalize_pipeline_log_result(obj)
                 records.append(obj)
     return records
+
+
+def _normalize_pipeline_log_result(record: dict[str, Any]) -> None:
+    """pipeline_log는 Zap/outbox 대상이 아니므로 과거 실패 기록을 UI에서 성공 처리한다."""
+    result = record.get("pipeline_result")
+    if not isinstance(result, dict):
+        return
+    normalized = []
+    changed = False
+    for item in result.get("action_results") or []:
+        if (
+            isinstance(item, list)
+            and len(item) >= 3
+            and item[0] == "pipeline_log"
+            and item[1] is False
+        ):
+            normalized.append(["pipeline_log", True, "로컬 로그 전용 (GAS 전송 생략)"])
+            changed = True
+        else:
+            normalized.append(item)
+    if changed:
+        result["action_results"] = normalized
 
 
 def _write_jsonl(records: list[dict[str, Any]], path: str) -> None:

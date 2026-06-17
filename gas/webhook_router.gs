@@ -13,7 +13,7 @@
  *   outbox_notion   → Zap: Notion Create Item
  *   outbox_docs     → Zap: Google Docs Insert Text
  *   outbox_zoom     → Zap: Zoom Create Meeting
- *   outbox_scheduled  Zap: Delay Until + Notion 체크 확인 + Gmail (HITL 최종 합격)
+ *   outbox_scheduled  Zap: Delay Until + Notion 후보 검색 + Gmail 예약 발송
  *   send_email_now  즉시 Gmail/MailApp 발송 (Zapier 폴링 대기 없음)
  *   pipeline_log    파이프라인 로그 (Zap 불필요)
  *
