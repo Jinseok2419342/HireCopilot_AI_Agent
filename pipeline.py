@@ -18,11 +18,10 @@ outbox 시트 스키마 (GAS가 탭 없으면 헤더와 함께 자동 생성):
   outbox_scheduled: timestamp | send_after_iso | to | subject | body | candidate_name
   pipeline_log:     timestamp | candidate_name | branch | screening | detail
 
-outbox_scheduled (HITL 최종 합격):
-  추천 분기에서 최종 합격 안내 메일을 예약 큐에 넣는다. 전용 Zap이
+outbox_scheduled (예약 최종 합격 메일):
+  추천 분기에서 최종 합격 안내 메일을 예약 큐에 넣는다. 현재 Zap은
   New Row → Delay Until(send_after_iso) → Notion에서 후보 검색 →
-  관리자가 체크박스를 켠 경우에만 → Gmail 발송 순으로 처리한다.
-  즉 사람(관리자)의 Notion 체크가 최종 발송 게이트다.
+  Gmail 발송 순으로 처리한다.
 """
 
 from __future__ import annotations
@@ -36,6 +35,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 import requests
+from dotenv import load_dotenv
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -106,6 +106,8 @@ def load_pipeline_config(config_path: str | None = None) -> dict:
     관리자 콘솔이 저장하는 recruiter_config.json "pipeline" 섹션이
     .env 값보다 우선한다.
     """
+    load_dotenv(override=True)
+
     min_gpa = os.getenv("PIPELINE_MIN_GPA", "3.0").strip()
     try:
         min_gpa_f = float(min_gpa)
@@ -347,8 +349,8 @@ def build_branch_actions(
 
     if opinion == "추천":
         actions.append(_notion_action(name, notion_database, notes))
-        # HITL 최종 합격: 다음날 오후 2시(KST)까지 관리자가 Notion 체크박스를
-        # 켜 두면 전용 Zap이 합격 메일을 발송한다 (체크 안 하면 미발송).
+        # 최종 합격 메일 예약: Scheduled Zap이 send_after_iso까지 대기한 뒤
+        # Notion 후보자 검색을 거쳐 Gmail로 발송한다.
         if email:
             actions.append(
                 _scheduled_email_action(
@@ -364,8 +366,8 @@ def build_branch_actions(
                 _slack_action(
                     admin_slack,
                     f"✅ *추천 지원자* — {name} ({email}) / {position}\n"
-                    "내일 오후 2시 전까지 Notion에서 최종 검토 후 승인 체크박스를 켜 주세요.\n"
-                    "체크된 경우에만 최종 합격 메일이 자동 발송됩니다.",
+                    "최종 합격 메일이 outbox_scheduled에 예약되었습니다.\n"
+                    "Scheduled Zap은 예약 시각까지 대기한 뒤 Notion 후보자 검색 후 Gmail로 발송합니다.",
                 )
             )
         if admin_email:
@@ -484,9 +486,15 @@ def _dispatch_actions(
     results: list[tuple[str, bool, str]] = []
     if not webhook_url:
         for action in actions:
-            results.append((action.target, False, "GAS 웹훅 URL 미설정"))
+            if action.target == "pipeline_log":
+                results.append((action.target, True, "로컬 로그 전용 (GAS 전송 생략)"))
+            else:
+                results.append((action.target, False, "GAS 웹훅 URL 미설정"))
         return results
     for action in actions:
+        if action.target == "pipeline_log":
+            results.append((action.target, True, "로컬 로그 전용 (GAS 전송 생략)"))
+            continue
         ok, msg = post_to_gas(action.to_payload(), webhook_url)
         results.append((action.target, ok, msg))
     return results

@@ -204,6 +204,71 @@ class TestBranchActions(unittest.TestCase):
         self.assertEqual(actions, [])
 
 
+class TestZapierColumnContracts(unittest.TestCase):
+    """실제 Zapier 설정 기준 컬럼 계약.
+
+    A열은 timestamp라서 Zapier 액션은 주로 B열부터 읽는다.
+    """
+
+    def _action_map(self, actions):
+        return {a.target: a for a in actions}
+
+    def test_email_zap_reads_b_to_c_subject_d_body_e_from_name(self):
+        _, actions = build_branch_actions(
+            _base_payload(hiring_opinion="비추천"),
+            admin_email="",
+            admin_slack="",
+            notion_database="DB",
+        )
+        email = actions[0].row
+        self.assertEqual(email[1], "hong@example.com")  # B열: 수신자
+        self.assertIn("홍길동", email[2])  # C열: 제목
+        self.assertIn("<p>", email[3])  # D열: HTML 본문
+        self.assertEqual(email[4], "채용팀")  # E열: 발신자 이름
+
+    def test_hold_scenario_matches_docs_notion_zoom_zaps(self):
+        _, actions = build_branch_actions(
+            _base_payload(hiring_opinion="보류"),
+            admin_email="admin@test.com",
+            admin_slack="",
+            notion_database="2026 보류 합격자 목록",
+            followup_questions="1. 고객 불만 상황을 STAR로 설명해 주세요.",
+        )
+        by_target = self._action_map(actions)
+
+        notion = by_target["outbox_notion"].row
+        self.assertEqual(notion[1], "홍길동")  # B열: Notion Name
+        self.assertEqual(notion[2], "2026 보류 합격자 목록")
+        self.assertIn("기술 검증 필요", notion[3])  # D열: Notion Content
+
+        docs = by_target["outbox_docs"].row
+        self.assertEqual(docs[1], "홍길동")
+        self.assertEqual(docs[2], "hong@example.com")
+        self.assertIn("2차 면접 맞춤 질문", docs[3])  # D열: Google Docs Append text
+        self.assertIn("STAR", docs[3])
+
+        zoom = by_target["outbox_zoom"].row
+        self.assertIn("홍길동", zoom[1])  # B열: 회의 제목
+        self.assertRegex(zoom[2], r"T14:00:00")  # C열: 회의 시작 시간
+        self.assertEqual(zoom[3], 30)  # D열: 회의 시간/기간
+
+    def test_recommend_scenario_matches_scheduled_zap(self):
+        _, actions = build_branch_actions(
+            _base_payload(hiring_opinion="추천"),
+            admin_email="",
+            admin_slack="",
+            notion_database="2026 보류 합격자 목록",
+        )
+        by_target = self._action_map(actions)
+
+        scheduled = by_target["outbox_scheduled"].row
+        self.assertRegex(scheduled[1], r"T14:00:00")  # B열: 전송 예정 날짜
+        self.assertEqual(scheduled[2], "hong@example.com")  # C열: 받을 주소
+        self.assertIn("합격", scheduled[3])  # D열: 제목
+        self.assertIn("<strong>최종 합격</strong>", scheduled[4])  # E열: HTML 본문
+        self.assertEqual(scheduled[5], "홍길동")  # F열: Notion 검색 후보자 이름
+
+
 class TestLoadPipelineConfigOverrides(unittest.TestCase):
     """관리자 콘솔이 저장한 recruiter_config.json "pipeline" 섹션이 .env보다 우선."""
 
@@ -448,6 +513,31 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(updated.action_results[0][1])
 
+    def test_pipeline_log_is_not_dispatched_to_gas(self):
+        import pipeline as pl
+
+        calls = []
+
+        def fake_post(payload, url):
+            calls.append(payload["target"])
+            return True, "ok"
+
+        orig = pl.post_to_gas
+        pl.post_to_gas = fake_post
+        try:
+            results = pl._dispatch_actions(
+                [
+                    OutboxAction("outbox_email", ["t", "a@b.c", "s", "b", "f"]),
+                    OutboxAction("pipeline_log", ["t", "n", "b", "p", "d"]),
+                ],
+                "http://fake",
+            )
+        finally:
+            pl.post_to_gas = orig
+
+        self.assertEqual(calls, ["outbox_email"])
+        self.assertEqual(results[1], ("pipeline_log", True, "로컬 로그 전용 (GAS 전송 생략)"))
+
 
 class TestPipelineEndToEnd(unittest.TestCase):
     """README 역할 2 검증 항목: payload 하나를 넣었을 때
@@ -483,7 +573,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(result.branch, "추천")
         self.assertEqual(
             [c["target"] for c in calls],
-            ["interviews", "outbox_notion", "outbox_scheduled", "outbox_slack", "outbox_email", "pipeline_log"],
+            ["interviews", "outbox_notion", "outbox_scheduled", "outbox_slack", "outbox_email"],
         )
         self.assertTrue(result.outbox_actions_ok)
 
@@ -516,7 +606,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(result.branch, "비추천")
         self.assertEqual(
             [c["target"] for c in calls],
-            ["interviews", "outbox_email", "pipeline_log"],
+            ["interviews", "outbox_email"],
         )
         email = next(c for c in calls if c["target"] == "outbox_email")
         self.assertEqual(email["row"][1], "hong@example.com")
@@ -525,7 +615,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
         result, calls = self._run(_base_payload(gpa="2.0", hiring_opinion="추천"))
         self.assertFalse(result.screening_passed)
         self.assertEqual(result.branch, "filtered")
-        self.assertEqual([c["target"] for c in calls], ["interviews", "pipeline_log"])
+        self.assertEqual([c["target"] for c in calls], ["interviews"])
 
     def test_retry_resends_only_failed_outbox(self):
         result, _ = self._run(

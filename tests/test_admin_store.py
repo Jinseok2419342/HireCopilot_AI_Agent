@@ -1,5 +1,6 @@
 """admin_store.py unit tests (stdlib only)."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -71,6 +72,35 @@ class TestAdminStore(unittest.TestCase):
         self.assertEqual(failed_outbox_count(record), 1)
         self.assertEqual(failed_outbox_count(records[0]), 0)
         self.assertEqual(summarize_records(records)["hold"], 1)
+
+    def test_legacy_failed_pipeline_log_is_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin.jsonl")
+            legacy = {
+                "record_id": "legacy",
+                "recorded_at": "2026-01-01T00:00:00+00:00",
+                "payload": _payload(),
+                "pipeline_result": {
+                    "interview_saved": [True, "ok"],
+                    "screening_passed": True,
+                    "screening_reason": "통과",
+                    "branch": "보류",
+                    "actions": [{"target": "pipeline_log", "row": ["t", "n", "b", "p", "d"]}],
+                    "action_results": [["pipeline_log", False, "GAS 웹훅 URL 미설정"]],
+                },
+                "review": {"status": "not_required", "note": "", "reviewer": "", "updated_at": ""},
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(legacy, ensure_ascii=False))
+                f.write("\n")
+
+            records = list_interview_records(path=path)
+
+        self.assertEqual(failed_outbox_count(records[0]), 0)
+        self.assertEqual(
+            records[0]["pipeline_result"]["action_results"][0],
+            ["pipeline_log", True, "로컬 로그 전용 (GAS 전송 생략)"],
+        )
 
     def test_update_unknown_record_id_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:

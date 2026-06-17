@@ -89,7 +89,7 @@ flowchart TD
 | `outbox_notion` | Notion DB 항목 생성 큐 | 필요 |
 | `outbox_docs` | Google Docs 텍스트 추가 큐 | 필요 |
 | `outbox_zoom` | Zoom 미팅 생성 큐 | 필요 |
-| `outbox_scheduled` | 최종 합격 메일 예약 큐 (HITL) | 필요 |
+| `outbox_scheduled` | 최종 합격 메일 예약 큐 | 필요 |
 | `pipeline_log` | 파이프라인 로그 | 불필요 |
 
 ## Zapier 앱별 전용 Zap
@@ -105,7 +105,7 @@ flowchart TD
 | `outbox_zoom` | New Spreadsheet Row | Zoom Create Meeting | Topic=`topic`, Start=`start_time_iso`, Duration=`duration_min` |
 | `outbox_scheduled` | New Spreadsheet Row | Delay Until → Notion Find Item → Gmail Send Email | Delay=`send_after_iso`, Notion 검색=`candidate_name`, To=`to`, Subject=`subject`, Body=`body` |
 
-`outbox_scheduled`만 예외적으로 Zap 안에 Delay Until과 Notion 조회가 들어갑니다. 추천 지원자의 최종 합격 메일은 관리자가 Notion에서 승인 체크박스를 켠 경우에만, 예약된 시각(`send_after_iso`, 다음날 오후 2시 KST) 이후에 발송됩니다. 사람의 승인(HITL)이 발송 게이트이며, 체크하지 않으면 메일은 나가지 않습니다.
+`outbox_scheduled`만 예외적으로 Zap 안에 Delay Until과 Notion 조회가 들어갑니다. 추천 지원자의 최종 합격 메일은 예약된 시각(`send_after_iso`, 다음날 오후 2시 KST) 이후에 Gmail로 발송됩니다. 현재 Zap은 Notion에서 후보자 이름을 검색한 뒤 Gmail 발송 단계로 이어지는 구조입니다.
 
 예를 들어 Gmail 발송은 이렇게 움직입니다.
 

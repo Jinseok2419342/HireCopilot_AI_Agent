@@ -41,52 +41,6 @@ DEFAULT_POSITIONS = [
     {"name": "Operations Coordinator (운영 조정관)", "criteria": ""},
 ]
 
-ZAPIER_GUIDE_ROWS = [
-    {
-        "outbox 탭": "outbox_email",
-        "코드가 추가하는 행": "timestamp | to | subject | body | from_name",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Gmail - Send Email",
-        "주요 매핑": "To=to, Subject=subject, Body=body",
-    },
-    {
-        "outbox 탭": "outbox_slack",
-        "코드가 추가하는 행": "timestamp | recipient | message",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Slack - Send Direct Message",
-        "주요 매핑": "User=recipient, Message=message",
-    },
-    {
-        "outbox 탭": "outbox_notion",
-        "코드가 추가하는 행": "timestamp | name | database | notes",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Notion - Create Database Item",
-        "주요 매핑": "Name=name, Notes=notes",
-    },
-    {
-        "outbox 탭": "outbox_docs",
-        "코드가 추가하는 행": "timestamp | candidate_name | candidate_email | content",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Google Docs - Append Text",
-        "주요 매핑": "Document은 Zap에서 고정, Text=content",
-    },
-    {
-        "outbox 탭": "outbox_zoom",
-        "코드가 추가하는 행": "timestamp | topic | start_time_iso | duration_min | candidate_name",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Zoom - Create Meeting",
-        "주요 매핑": "Topic=topic, Start=start_time_iso, Duration=duration_min",
-    },
-    {
-        "outbox 탭": "outbox_scheduled",
-        "코드가 추가하는 행": "timestamp | send_after_iso | to | subject | body | candidate_name",
-        "Zapier Trigger": "Google Sheets - New Spreadsheet Row",
-        "Zapier Action": "Delay Until(send_after_iso) → Notion Find Item → Gmail Send Email",
-        "주요 매핑": "Delay Until=send_after_iso, Notion 검색=candidate_name, To=to, Subject=subject, Body=body (Notion 승인 체크 시에만 발송)",
-    },
-]
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -140,6 +94,8 @@ def _result_rows(record: dict) -> list[dict]:
     rows = []
     for i, item in enumerate(result.get("action_results") or []):
         target = item[0] if len(item) > 0 else ""
+        if target == "pipeline_log":
+            continue
         ok = bool(item[1]) if len(item) > 1 else False
         message = item[2] if len(item) > 2 else ""
         action_row = actions[i].get("row", []) if i < len(actions) else []
@@ -183,6 +139,61 @@ def _scheduled_action_row(record: dict) -> list | None:
         if action.get("target") == "outbox_scheduled":
             return list(action.get("row") or [])
     return None
+
+
+def _record_sort_score(record: dict) -> tuple[int, float]:
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    opinion = payload.get("hiring_opinion")
+    scores = payload.get("scores") or {}
+    try:
+        overall = float(scores.get("overall") or 0)
+    except (TypeError, ValueError):
+        overall = 0.0
+    if failed_outbox_count(record):
+        priority = 0
+    elif opinion == "추천" and result.get("screening_passed"):
+        priority = 1
+    elif opinion == "보류" and result.get("screening_passed"):
+        priority = 2
+    elif not result.get("screening_passed"):
+        priority = 4
+    else:
+        priority = 3
+    return priority, -overall
+
+
+def _record_action_label(record: dict) -> str:
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    opinion = payload.get("hiring_opinion")
+    if failed_outbox_count(record):
+        return "알림 재전송 필요"
+    if not result.get("screening_passed"):
+        return "자격 미달 확인"
+    if opinion == "추천":
+        return "예약 메일 확인"
+    if opinion == "보류":
+        return "2차 면접 검토"
+    if opinion == "비추천":
+        return "결과 안내 확인"
+    return "상세 확인"
+
+
+def _record_table_row(record: dict) -> dict:
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    scores = payload.get("scores") or {}
+    return {
+        "처리": _record_action_label(record),
+        "일시": (payload.get("timestamp") or record.get("recorded_at") or "")[:16],
+        "이름": payload.get("candidate_name", ""),
+        "포지션": payload.get("position", ""),
+        "의견": _opinion_badge(payload.get("hiring_opinion")),
+        "점수": scores.get("overall", ""),
+        "자격": "통과" if result.get("screening_passed") else "미달",
+        "알림": "실패" if failed_outbox_count(record) else "정상",
+    }
 
 
 def _unique_positions(records: list[dict]) -> list[str]:
@@ -272,73 +283,71 @@ def _render_record_detail(record: dict) -> None:
     result = record.get("pipeline_result") or {}
     scores = payload.get("scores") or {}
 
-    st.markdown(f"**기록 ID:** `{record.get('record_id', '-')}`")
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.write(f"**이름:** {payload.get('candidate_name', '-')}")
-        st.write(f"**이메일:** {payload.get('candidate_email', '-')}")
-        st.write(f"**포지션:** {payload.get('position', '-')}")
-    with col_b:
-        st.write(f"**학력:** {payload.get('degree', '-')}")
-        st.write(f"**경력:** {payload.get('experience', '-')}")
-        st.write(f"**학점:** {payload.get('gpa', '-') or '-'}")
-    with col_c:
-        st.write(f"**적합도:** {payload.get('fit_level', '-')}")
-        st.write(f"**채용 의견:** {_opinion_badge(payload.get('hiring_opinion'))}")
-        st.write(f"**최종 검토:** {_review_badge(_effective_review(record))}")
-        st.write(f"**종합 점수:** {scores.get('overall', '-')} / 5")
+    st.markdown(f"**{payload.get('candidate_name', '-')}** · {payload.get('position', '-')} · `{record.get('record_id', '-')}`")
 
-    col_left, col_right = st.columns([2, 1])
-    with col_left:
-        st.markdown("**평가 요약**")
-        st.write(payload.get("summary") or "(요약 없음)")
-        if payload.get("hiring_recommendation_reason"):
-            st.markdown("**채용 판단 이유**")
-            st.write(payload["hiring_recommendation_reason"])
-        st.markdown("**추천 다음 단계**")
-        st.write(payload.get("recommended_next_step") or "(다음 단계 없음)")
-    with col_right:
-        st.markdown("**파이프라인**")
-        saved = result.get("interview_saved", ["", ""])
-        st.write(f"면접 저장: {saved[1] if len(saved) > 1 else '-'}")
-        passed = result.get("screening_passed")
-        st.write(f"자격 필터: {'✅ 통과' if passed else '🚫 ' + str(result.get('screening_reason', '-'))}")
-        st.write(f"분기: {result.get('branch', '-')}")
-        review = _effective_review(record)
-        if review.get("updated_at"):
-            st.caption(f"검토 기록: {review.get('updated_at')} · {review.get('note', '')}")
-        fail_n = failed_outbox_count(record)
-        if fail_n:
-            st.error(f"실패 outbox {fail_n}건")
-        else:
-            st.success("outbox 정상")
+    summary_cols = st.columns(5)
+    summary_cols[0].metric("채용 의견", _opinion_badge(payload.get("hiring_opinion")))
+    summary_cols[1].metric("종합 점수", f"{scores.get('overall', '-')} / 5")
+    summary_cols[2].metric("자격", "통과" if result.get("screening_passed") else "미달")
+    summary_cols[3].metric("알림", "실패" if failed_outbox_count(record) else "정상")
+    summary_cols[4].metric("검토", _review_badge(_effective_review(record)))
 
-    rubric_labels = {
-        "culture_fit": "문화 적합도",
-        "customer_response": "고객 응대",
-        "ownership": "주인의식",
-        "communication": "커뮤니케이션",
-        "learning_agility": "학습 민첩성",
-    }
-    score_cols = st.columns(5)
-    for col, (key, label) in zip(score_cols, rubric_labels.items()):
-        col.metric(label, f"{scores.get(key, '-')} / 5")
+    tab_summary, tab_detail, tab_raw = st.tabs(["요약", "상세 정보", "원본"])
 
-    col_s, col_c = st.columns(2)
-    with col_s:
-        if payload.get("strengths"):
+    with tab_summary:
+        col_left, col_right = st.columns([2, 1])
+        with col_left:
+            st.markdown("**평가 요약**")
+            st.write(payload.get("summary") or "(요약 없음)")
+            if payload.get("hiring_recommendation_reason"):
+                st.markdown("**채용 판단 이유**")
+                st.write(payload["hiring_recommendation_reason"])
+            st.markdown("**추천 다음 단계**")
+            st.write(payload.get("recommended_next_step") or "(다음 단계 없음)")
+        with col_right:
+            st.markdown("**후보자 정보**")
+            st.write(f"이메일: {payload.get('candidate_email', '-')}")
+            st.write(f"학력: {payload.get('degree', '-')}")
+            st.write(f"경력: {payload.get('experience', '-')}")
+            st.write(f"학점: {payload.get('gpa', '-') or '-'}")
+            st.write(f"적합도: {payload.get('fit_level', '-')}")
+
+            st.markdown("**파이프라인**")
+            saved = result.get("interview_saved", ["", ""])
+            st.write(f"면접 저장: {saved[1] if len(saved) > 1 else '-'}")
+            passed = result.get("screening_passed")
+            st.write(f"자격 필터: {'통과' if passed else str(result.get('screening_reason', '-'))}")
+            st.write(f"분기: {result.get('branch', '-')}")
+            review = _effective_review(record)
+            if review.get("updated_at"):
+                st.caption(f"검토 기록: {review.get('updated_at')} · {review.get('note', '')}")
+
+    with tab_detail:
+        rubric_labels = {
+            "culture_fit": "문화 적합도",
+            "customer_response": "고객 응대",
+            "ownership": "주인의식",
+            "communication": "커뮤니케이션",
+            "learning_agility": "학습 민첩성",
+        }
+        score_cols = st.columns(5)
+        for col, (key, label) in zip(score_cols, rubric_labels.items()):
+            col.metric(label, f"{scores.get(key, '-')} / 5")
+
+        col_s, col_c = st.columns(2)
+        with col_s:
             st.markdown("**강점**")
-            for item in payload["strengths"]:
+            for item in payload.get("strengths") or ["(기록 없음)"]:
                 st.markdown(f"- {item}")
-    with col_c:
-        if payload.get("concerns"):
+        with col_c:
             st.markdown("**우려사항**")
-            for item in payload["concerns"]:
+            for item in payload.get("concerns") or ["(기록 없음)"]:
                 st.markdown(f"- {item}")
 
-    with st.expander("평가 JSON 보기"):
+    with tab_raw:
+        st.markdown("**평가 JSON**")
         st.json(payload)
-    with st.expander("대화록 보기"):
+        st.markdown("**대화록**")
         st.code(payload.get("transcript") or "(대화록 없음)", language="text")
 
 
@@ -463,7 +472,7 @@ def render_dashboard(records: list[dict]) -> None:
     summary = summarize_records(records)
     cfg = load_pipeline_config()
 
-    st.markdown("### 오늘의 현황")
+    st.markdown("### 운영 요약")
     cols = st.columns(4)
     cols[0].metric("전체 면접", summary["total"])
     cols[1].metric("추천", summary["recommended"])
@@ -474,30 +483,34 @@ def render_dashboard(records: list[dict]) -> None:
     if failed_records:
         st.warning(f"알림 전송 실패 {len(failed_records)}건 — **알림/파이프라인** 메뉴에서 재전송하세요.")
 
-    cols2 = st.columns(3)
+    pending_review = [
+        r for r in records
+        if (r.get("payload") or {}).get("hiring_opinion") in ("추천", "보류")
+        and (r.get("pipeline_result") or {}).get("screening_passed")
+        and _effective_review(r).get("status") in ("pending", "not_required")
+    ]
+    cols2 = st.columns(4)
     cols2[0].metric("자격 통과", summary["screening_passed"])
     cols2[1].metric("자격 미달", summary["screening_failed"])
-    cols2[2].metric("알림 실패", summary["failed_outbox"])
+    cols2[2].metric("관리자 확인", len(pending_review))
+    cols2[3].metric("알림 실패", summary["failed_outbox"])
 
     if records:
         st.divider()
+        st.markdown("**지금 확인할 항목**")
+        focus_records = sorted(records, key=_record_sort_score)[:6]
+        st.dataframe(
+            [_record_table_row(record) for record in focus_records],
+            use_container_width=True,
+            hide_index=True,
+        )
+
         st.markdown("**최근 면접**")
-        recent_rows = []
-        for record in records[:5]:
-            payload = record.get("payload") or {}
-            result = record.get("pipeline_result") or {}
-            recent_rows.append(
-                {
-                    "일시": (payload.get("timestamp") or record.get("recorded_at") or "")[:16],
-                    "이름": payload.get("candidate_name", ""),
-                    "포지션": payload.get("position", ""),
-                    "채용 의견": _opinion_badge(payload.get("hiring_opinion")),
-                    "최종 검토": _review_badge(_effective_review(record)),
-                    "자격": "✅" if result.get("screening_passed") else "🚫",
-                    "outbox 실패": failed_outbox_count(record),
-                }
-            )
-        st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [_record_table_row(record) for record in records[:5]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
     with st.expander("연결 상태 확인"):
         ok_api = bool(os.getenv("OPENAI_API_KEY", "").strip())
@@ -528,20 +541,13 @@ def render_interviews(records: list[dict]) -> None:
     overview_rows = []
     for record in filtered:
         payload = record.get("payload") or {}
-        result = record.get("pipeline_result") or {}
+        row = _record_table_row(record)
         overview_rows.append(
             {
-                "일시": (payload.get("timestamp") or record.get("recorded_at") or "")[:16],
-                "이름": payload.get("candidate_name", ""),
+                **row,
                 "이메일": payload.get("candidate_email", ""),
-                "포지션": payload.get("position", ""),
                 "학점": payload.get("gpa", ""),
-                "적합도": payload.get("fit_level", ""),
-                "채용 의견": _opinion_badge(payload.get("hiring_opinion")),
                 "최종 검토": _review_badge(_effective_review(record)),
-                "자격": "✅" if result.get("screening_passed") else "🚫",
-                "분기": result.get("branch", ""),
-                "outbox 실패": failed_outbox_count(record),
             }
         )
     st.dataframe(overview_rows, use_container_width=True, hide_index=True)
@@ -565,11 +571,11 @@ def render_final_review_queue(records: list[dict]) -> None:
         and (record.get("pipeline_result") or {}).get("screening_passed")
     ]
 
-    st.markdown("**최종 승인 큐 (Human-in-the-loop)**")
-    st.caption("AI가 추천한 후보자도 관리자가 승인해야 최종 합격 메일을 보낼 수 있습니다.")
+    st.markdown("**추천 후보 예약 메일 큐**")
+    st.caption("AI가 추천한 후보자의 최종 합격 메일 예약 상태를 확인하고, 필요하면 즉시 발송할 수 있습니다.")
 
     if not review_records:
-        st.info("최종 승인 대기 후보자가 없습니다.")
+        st.info("추천 후보자가 없습니다.")
         return
 
     pending_count = sum(
@@ -589,8 +595,8 @@ def render_final_review_queue(records: list[dict]) -> None:
     )
 
     col_pending, col_sent, col_rejected = st.columns(3)
-    col_pending.metric("승인 대기", pending_count)
-    col_sent.metric("승인/발송", sent_count)
+    col_pending.metric("검토 대기", pending_count)
+    col_sent.metric("즉시 발송", sent_count)
     col_rejected.metric("반려", rejected_count)
 
     st.dataframe(
@@ -631,14 +637,14 @@ def render_final_review_queue(records: list[dict]) -> None:
     review_note = st.text_area(
         "관리자 메모",
         value=review.get("note", ""),
-        placeholder="승인/반려 사유를 남기면 발표 때 의사결정 로그를 보여주기 좋습니다.",
+        placeholder="검토 메모를 남기면 발표 때 의사결정 로그를 보여주기 좋습니다.",
         key=f"review_note_{selected['record_id']}",
         height=80,
     )
 
     approve_col, hold_col, reject_col = st.columns(3)
     with approve_col:
-        if st.button("✅ 승인하고 합격 메일 발송", type="primary", use_container_width=True):
+        if st.button("📨 예약 메일 즉시 발송", type="primary", use_container_width=True):
             if not cfg["webhook_url"]:
                 st.error("GAS_WEBHOOK_URL이 설정되지 않아 메일 큐를 보낼 수 없습니다.")
             elif not scheduled_row:
@@ -649,9 +655,9 @@ def render_final_review_queue(records: list[dict]) -> None:
                 note = f"메일 발송 성공: {msg}" if ok else f"메일 발송 실패: {msg}"
                 update_review_status(selected["record_id"], status, note=note, reviewer="admin")
                 if ok:
-                    st.success("관리자 승인 완료. 합격 메일을 즉시 발송했습니다.")
+                    st.success("예약 메일을 즉시 발송했습니다.")
                 else:
-                    st.error(f"승인은 기록했지만 발송에 실패했습니다: {msg}")
+                    st.error(f"즉시 발송에 실패했습니다: {msg}")
                 st.rerun()
     with hold_col:
         if st.button("🟡 추가 보류", use_container_width=True):
@@ -744,7 +750,7 @@ def render_outbox(records: list[dict]) -> None:
 
 def render_simulator(records: list[dict]) -> None:
     st.markdown("### 테스트 도구")
-    st.caption("면접 없이 파이프라인을 테스트하거나, Zapier 연결을 점검합니다. (운영자 전용)")
+    st.caption("면접 없이 파이프라인과 outbox 전송 흐름을 점검합니다. (운영자 전용)")
     cfg = load_pipeline_config()
 
     tab_scenario, tab_instant, tab_manual = st.tabs(
@@ -793,6 +799,7 @@ def render_simulator(records: list[dict]) -> None:
                     "row 미리보기": " | ".join(str(v)[:40] for v in a.row),
                 }
                 for a in result.actions
+                if a.target != "pipeline_log"
             ]
             st.markdown("**계획된 액션**" + (" (드라이런 — 전송되지 않음)" if dry else ""))
             st.dataframe(action_rows, use_container_width=True, hide_index=True)
@@ -803,6 +810,7 @@ def render_simulator(records: list[dict]) -> None:
                     [
                         {"target": t, "status": "✅ 성공" if ok else "⚠️ 실패", "message": m}
                         for t, ok, m in result.action_results
+                        if t != "pipeline_log"
                     ],
                     use_container_width=True,
                     hide_index=True,
@@ -815,7 +823,7 @@ def render_simulator(records: list[dict]) -> None:
     # --- 2) 예약/액션 즉시 실행 ---
     with tab_instant:
         st.markdown(
-            "예약된 합격 메일(`outbox_scheduled`)을 **Delay/Notion 승인 게이트 없이 즉시 발송**하거나, "
+            "예약된 합격 메일(`outbox_scheduled`)을 **Delay 대기 없이 즉시 발송**하거나, "
             "기록된 outbox 액션을 그대로 다시 보냅니다."
         )
         if not cfg["webhook_url"]:
@@ -921,272 +929,6 @@ def render_simulator(records: list[dict]) -> None:
 
 
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1swaf7dyRsVRxepLJAXVoPO3YRNV0aPYmcBLL4_tPnbE"
-
-
-def render_zapier_guide() -> None:
-    st.subheader("⚡ Zapier 연결 가이드")
-    st.caption("Zapier를 처음 쓰는 사람도 따라할 수 있도록 단계별로 정리했습니다. 위에서부터 순서대로 진행하세요.")
-
-    # ── 0. 개념 ──────────────────────────────────────────────
-    st.markdown("### 0️⃣ Zapier가 뭔가요?")
-    st.markdown(
-        """
-Zapier는 **"A에서 어떤 일이 생기면, 자동으로 B를 실행"** 해주는 자동화 서비스입니다.
-코딩 없이 클릭만으로 앱과 앱을 연결합니다.
-
-- **Zap** = 자동화 규칙 1개 (예: "시트에 새 행이 생기면 → 메일을 보낸다")
-- **Trigger(트리거)** = 시작 신호. 이 프로젝트에서는 항상 **Google Sheets에 새 행 추가**
-- **Action(액션)** = 실제로 할 일. Gmail 발송, Slack 메시지 등
-
-이 프로젝트의 전체 흐름은 이렇습니다:
-"""
-    )
-    st.code(
-        "지원자 면접 종료\n"
-        "  → 파이썬(pipeline.py)이 판단: 추천? 보류? 비추천?\n"
-        "  → 판단 결과에 따라 Google Sheets의 outbox_* 탭에 '할 일'을 행으로 추가\n"
-        "  → Zapier가 새 행을 감지 (Trigger)\n"
-        "  → 연결된 앱이 실행 (Action: 메일 발송, Slack 알림, Zoom 생성 ...)",
-        language="text",
-    )
-    st.info(
-        "💡 판단(누구에게 뭘 보낼지)은 전부 파이썬 코드가 합니다. "
-        "Zapier 안에는 조건/분기를 넣지 않고, **탭 1개당 Zap 1개**로 단순하게 연결만 합니다."
-    )
-
-    # ── 1. 사전 준비 ─────────────────────────────────────────
-    st.markdown("### 1️⃣ 사전 준비 (Zap 만들기 전에)")
-    st.markdown(
-        f"""
-| # | 할 일 | 방법 |
-|---|---|---|
-| 1 | Zapier 계정 만들기 | [zapier.com](https://zapier.com) 접속 → **Sign up** → Google 계정으로 가입 (팀 공용 Google 계정 추천) |
-| 2 | 스프레드시트 열어보기 | [HireCopilot 시트 열기]({SPREADSHEET_URL}) — 접근 권한이 없다면 시트 소유자에게 공유 요청 |
-| 3 | **outbox 탭 미리 만들기** | 시트에 `outbox_email` 같은 탭이 아직 없으면 Zapier에서 선택할 수 없습니다. 이 콘솔의 **🧪 시뮬레이션/수동 작업 → 수동 outbox 전송**에서 각 탭으로 테스트 행을 1개씩 보내면 탭이 헤더와 함께 자동 생성됩니다 |
-| 4 | 연결할 앱 계정 준비 | Gmail, Slack(워크스페이스), Notion, Zoom 계정 로그인 상태 확인 |
-"""
-    )
-    st.warning(
-        "⚠️ 3번이 중요합니다. GAS가 첫 전송 때 탭을 자동 생성하므로, "
-        "**Zap을 만들기 전에 수동 전송으로 탭부터 만들어 두세요.** "
-        "탭의 1행(헤더: to, subject, body...)을 Zapier가 컬럼 이름으로 인식합니다."
-    )
-
-    # ── 2. 공통 순서 ─────────────────────────────────────────
-    st.markdown("### 2️⃣ Zap 만들기 공통 순서 (모든 Zap 동일)")
-    st.markdown(
-        """
-1. [zapier.com](https://zapier.com) 로그인 → 왼쪽 위 **+ Create** → **Zaps** 클릭
-2. **Trigger** 칸 클릭 → 검색창에 `Google Sheets` 입력 → 선택
-3. **Trigger event**: `New Spreadsheet Row` 선택 → **Continue**
-4. **Account**: **Sign in** 눌러 Google 계정 연결 (최초 1회만) → **Continue**
-5. **Spreadsheet**: `HireCopilot` 시트 선택 / **Worksheet**: 연결할 `outbox_*` 탭 선택 → **Continue**
-6. **Test trigger** 클릭 → 탭에 있는 행이 샘플로 보이면 성공 (1️⃣-3에서 보낸 테스트 행이 여기서 쓰입니다)
-7. **Action** 칸 클릭 → 아래 **3️⃣ 앱별 설정**에서 해당 앱 부분을 펼쳐 그대로 따라하기
-8. **Test step**으로 실제 발송 1회 테스트 → 문제 없으면 오른쪽 위 **Publish** (Zap이 **On**이 되어야 동작합니다!)
-"""
-    )
-
-    # ── 3. 앱별 설정 ─────────────────────────────────────────
-    st.markdown("### 3️⃣ 앱별 Action 설정 (만들 Zap은 총 6개)")
-    st.caption("각 항목을 펼치면 필드에 뭘 넣어야 하는지 나옵니다. '←' 왼쪽은 Zapier 입력란, 오른쪽은 시트 컬럼입니다.")
-
-    with st.expander("📧 Zap 1. 탈락/알림 메일 — `outbox_email` → Gmail  (난이도 ★☆☆, 가장 먼저 만드세요)"):
-        st.markdown(
-            """
-**언제 실행되나:** 비추천 지원자 탈락 안내, 관리자 알림 메일
-
-1. Trigger: 공통 순서대로, Worksheet = `outbox_email`
-2. Action 앱: `Gmail` → Event: **Send Email** → Gmail 계정 연결
-3. 필드 입력 (입력란을 클릭하면 시트 컬럼 목록이 떠서 선택할 수 있습니다):
-   - **To** ← `to`
-   - **Subject** ← `subject`
-   - **Body Type** : `HTML` 로 변경 (본문이 HTML로 만들어지기 때문)
-   - **Body** ← `body`
-   - **From Name** ← `from_name` (선택)
-4. Test → 본인 메일로 수신 확인 → **Publish**
-"""
-        )
-
-    with st.expander("💬 Zap 2. 관리자 Slack 알림 — `outbox_slack` → Slack  (난이도 ★☆☆)"):
-        st.markdown(
-            """
-**언제 실행되나:** 추천/보류 지원자 발생 시 관리자에게 DM
-
-1. Trigger: Worksheet = `outbox_slack`
-2. Action 앱: `Slack` → Event: **Send Direct Message** → Slack 워크스페이스 연결
-3. 필드 입력:
-   - **To Username**: 목록에서 관리자 선택, 또는 `Custom` 탭에서 ← `recipient` (시트에 Slack 멤버 ID가 들어옵니다. 예: U0123ABC)
-   - **Message Text** ← `message`
-   - **Send as a bot?**: Yes (기본값)
-4. Test → Slack DM 수신 확인 → **Publish**
-
-> 💡 Slack 멤버 ID 찾기: Slack에서 본인 프로필 → ⋯ 더보기 → "멤버 ID 복사".
-> 그 값을 `.env`의 `ADMIN_SLACK_USER_ID`에 넣어야 파이프라인이 이 탭에 행을 만듭니다.
-"""
-        )
-
-    with st.expander("📝 Zap 3. 후보자 Notion 등록 — `outbox_notion` → Notion  (난이도 ★★☆)"):
-        st.markdown(
-            """
-**언제 실행되나:** 추천/보류 지원자를 Notion 데이터베이스에 등록 (관리자 검토 목록)
-
-**먼저 Notion 쪽 준비:**
-1. Notion에서 새 페이지 → **데이터베이스(표)** 생성 (예: "채용 후보 검토")
-2. 속성(컬럼) 3개 준비:
-   - `Name` (제목 속성 — 기본으로 있음)
-   - `Notes` (텍스트 속성 — 새로 추가)
-   - `승인` (**체크박스** 속성 — 새로 추가. Zap 6의 최종 합격 게이트로 사용!)
-
-**Zapier 설정:**
-1. Trigger: Worksheet = `outbox_notion`
-2. Action 앱: `Notion` → Event: **Create Database Item** → Notion 연결 (연결 시 위에서 만든 DB 접근 허용 체크)
-3. 필드 입력:
-   - **Database**: 위에서 만든 DB 선택
-   - **Name** ← `name`
-   - **Notes** ← `notes`
-   - **승인**: 비워두기 (관리자가 나중에 직접 체크)
-4. Test → Notion에 항목 생기는지 확인 → **Publish**
-"""
-        )
-
-    with st.expander("📄 Zap 4. 2차 면접 질문 문서 — `outbox_docs` → Google Docs  (난이도 ★☆☆)"):
-        st.markdown(
-            """
-**언제 실행되나:** 보류 지원자의 AI 생성 2차 면접 질문을 문서에 누적 기록
-
-**먼저:** Google Docs에서 빈 문서 1개 생성 (예: "2차 면접 질문 모음")
-
-1. Trigger: Worksheet = `outbox_docs`
-2. Action 앱: `Google Docs` → Event: **Append Text to Document**
-3. 필드 입력:
-   - **Document Name**: 위에서 만든 문서 선택 (고정)
-   - **Text to Append** ← `content`  (앞뒤로 줄바꿈이나 `----` 구분선을 직접 타이핑해 넣으면 보기 좋습니다)
-4. Test → 문서에 텍스트 추가 확인 → **Publish**
-"""
-        )
-
-    with st.expander("🎥 Zap 5. 2차 면접 Zoom 생성 — `outbox_zoom` → Zoom  (난이도 ★★☆)"):
-        st.markdown(
-            """
-**언제 실행되나:** 보류 지원자의 추가 인터뷰 미팅을 자동 생성 (기본: 다음날 오후 2시, 30분)
-
-1. Trigger: Worksheet = `outbox_zoom`
-2. Action 앱: `Zoom` → Event: **Create Meeting** → Zoom 계정 연결
-3. 필드 입력:
-   - **Topic** ← `topic`
-   - **When (Start Time)** ← `start_time_iso`  (ISO 형식 시간이 들어있어 그대로 인식됩니다)
-   - **Duration (in minutes)** ← `duration_min`
-   - **Meeting Type**: `Scheduled Meeting`
-4. Test → Zoom 예약 미팅 생성 확인 → **Publish**
-"""
-        )
-
-    with st.expander("⏰ Zap 6. 최종 합격 메일 (사람 승인 후 예약 발송) — `outbox_scheduled`  (난이도 ★★★, 5단계)"):
-        st.markdown(
-            """
-**언제 실행되나:** 추천 지원자 발생 시. 관리자가 **다음날 오후 2시 전까지 Notion에서 `승인` 체크박스를 켜면**
-그 시각에 최종 합격 메일이 자동 발송됩니다. 체크하지 않으면 발송되지 않습니다 (사람이 최종 결정).
-
-> ⚠️ 이 Zap만 5단계짜리입니다. **Zapier 무료 플랜은 2단계(트리거+액션 1개)까지만 지원**하므로
-> 유료 플랜(또는 트라이얼)이 필요합니다. 유료가 어렵다면 이 Zap은 생략하고,
-> 콘솔의 **🧪 시뮬레이션/수동 작업 → 예약/액션 즉시 실행**에서 관리자가 직접 "지금 즉시 발송"을 눌러도 됩니다.
-
-1. **Trigger**: Google Sheets `New Spreadsheet Row`, Worksheet = `outbox_scheduled`
-2. **Action ①**: `Delay by Zapier` → Event: **Delay Until** → **Date/Time** ← `send_after_iso`
-   (이 시각까지 기다렸다가 다음 단계 진행)
-3. **Action ②**: `Notion` → Event: **Find Database Item** → Database: Zap 3에서 만든 DB
-   → 검색 필드: `Name` ← `candidate_name`
-4. **Action ③**: `Filter by Zapier` → **Only continue if...**
-   → 필드: (Notion 결과의) `승인` → 조건: `(Boolean) Is true`
-   (체크 안 됐으면 여기서 멈추고 메일이 나가지 않습니다)
-5. **Action ④**: `Gmail` → **Send Email**
-   - **To** ← `to` / **Subject** ← `subject` / **Body Type**: HTML / **Body** ← `body`
-6. Test 후 **Publish**
-"""
-        )
-
-    # ── 4. 연결 확인 ─────────────────────────────────────────
-    st.markdown("### 4️⃣ 연결이 잘 됐는지 확인하는 법")
-    st.markdown(
-        """
-1. 이 콘솔의 **🧪 시뮬레이션/수동 작업 → 수동 outbox 전송**에서 탭을 골라 테스트 행을 보냅니다
-   (받는 사람은 본인 메일/본인 Slack으로!)
-2. 잠시 기다리면 연결한 앱에서 실제 동작이 일어납니다
-3. 안 오면 Zapier 사이트의 **Zap History**(왼쪽 메뉴)에서 실행 이력과 에러 메시지를 확인하세요
-4. 전체 흐름 테스트는 **시나리오 실행 → 실제 전송** 모드로 추천/보류/비추천을 하나씩 돌려보세요
-"""
-    )
-
-    # ── 5. 자주 막히는 부분 ───────────────────────────────────
-    st.markdown("### 5️⃣ 자주 막히는 부분 (FAQ)")
-    with st.expander("Q. 시트에 행이 추가됐는데 Zap이 실행을 안 해요"):
-        st.markdown(
-            """
-- Zap이 **Published / On** 상태인지 확인하세요 (만들기만 하고 끄두면 동작 안 함)
-- **무료 플랜은 새 행을 즉시 감지하지 않고 일정 주기(약 15분)마다 확인**합니다. 기다려 보세요
-- Trigger의 Spreadsheet/Worksheet가 올바른 탭인지 다시 확인하세요
-"""
-        )
-    with st.expander("Q. Worksheet 목록에 outbox 탭이 안 보여요"):
-        st.markdown(
-            """
-탭이 아직 시트에 없는 경우입니다. **수동 outbox 전송**으로 그 탭에 행을 1개 보내면
-GAS가 헤더와 함께 탭을 자동 생성합니다. 그 후 Zapier에서 목록 새로고침(↻) 하세요.
-"""
-        )
-    with st.expander("Q. 필드 매핑할 때 컬럼 이름 대신 'Col A, Col B'로 나와요"):
-        st.markdown(
-            """
-탭의 1행이 헤더(`to`, `subject`, ...)가 아닌 경우입니다. GAS가 탭을 자동 생성했다면 헤더가 있어야 정상입니다.
-시트에서 1행이 데이터로 덮였는지 확인하고, 필요하면 1행에 헤더를 직접 입력한 뒤 Zap의 Test trigger를 다시 실행하세요.
-"""
-        )
-    with st.expander("Q. 메일이 진짜 지원자에게 갈까 봐 테스트가 무서워요"):
-        st.markdown(
-            """
-- **수동 outbox 전송**: 받는 사람을 본인 메일로 직접 입력하니 안전합니다
-- **시나리오 실행 — 드라이런 모드**: 아무것도 전송하지 않고 어떤 행이 만들어질지만 미리 봅니다
-- **시나리오 실행 — 실제 전송**: 지원자 이메일 칸에 본인 메일을 넣고 돌리세요
-"""
-        )
-    with st.expander("Q. Zap 6(최종 합격)이 무료 플랜에서 안 만들어져요"):
-        st.markdown(
-            """
-정상입니다 — 무료 플랜은 다단계 Zap을 지원하지 않습니다. 두 가지 선택지가 있습니다:
-1. Zapier 유료 플랜(트라이얼 포함) 사용
-2. Zap 6 없이 운영: 관리자가 이 콘솔의 **예약/액션 즉시 실행**에서 검토 후 직접 "지금 즉시 발송" 클릭
-   (사람이 승인한다는 점은 동일하고, 자동 예약만 수동으로 바뀝니다)
-"""
-        )
-
-    # ── 6. 요약 표 ───────────────────────────────────────────
-    st.divider()
-    st.markdown("### 📋 요약: 만들어야 할 Zap 한눈에 보기")
-    st.dataframe(ZAPIER_GUIDE_ROWS, use_container_width=True, hide_index=True)
-
-    st.markdown("**참고: 채용 의견별로 어떤 outbox가 생기나**")
-    st.dataframe(
-        [
-            {
-                "채용 의견": "🟢 추천",
-                "생성 outbox": "outbox_notion, outbox_scheduled(최종 합격 메일 예약), outbox_slack, outbox_email(관리자 알림)",
-                "의도": "관리자가 Notion에서 승인 체크하면 예약된 최종 합격 메일 발송 (HITL)",
-            },
-            {
-                "채용 의견": "🟡 보류",
-                "생성 outbox": "outbox_slack, outbox_email, outbox_notion, outbox_zoom, outbox_docs",
-                "의도": "추가 면접 준비와 관리자 검토",
-            },
-            {
-                "채용 의견": "🔴 비추천",
-                "생성 outbox": "outbox_email",
-                "의도": "지원자에게 결과 안내 메일 발송",
-            },
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
 
 
 def render_filter_settings(config: dict) -> None:
@@ -1341,12 +1083,11 @@ def render_recruiting_settings(config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 _NAV_ITEMS = [
-    "📊 대시보드",
-    "🧑‍💼 지원자 목록",
-    "📤 알림/파이프라인",
-    "🧪 테스트 도구",
-    "⚡ Zapier 연결",
-    "⚙️ 설정",
+    "대시보드",
+    "지원자 관리",
+    "알림/파이프라인",
+    "테스트 도구",
+    "설정",
 ]
 
 st.set_page_config(
@@ -1362,25 +1103,25 @@ st.markdown(
     div[data-testid="stMetric"] {
         background: var(--secondary-background-color);
         border: 1px solid rgba(128,128,128,0.18);
-        border-radius: 14px;
-        padding: 16px 18px;
+        border-radius: 8px;
+        padding: 14px 16px;
     }
     div[data-testid="stMetricValue"] { font-weight: 700; font-size: 1.6rem; }
     div[data-testid="stSidebar"] { background: var(--secondary-background-color); }
     .rc-hero {
-        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 60%, #60a5fa 100%);
-        padding: 24px 28px;
-        border-radius: 18px;
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,0.18);
+        padding: 18px 22px;
+        border-radius: 8px;
         margin-bottom: 20px;
-        color: #fff;
     }
     .rc-hero h1 { margin: 0; font-size: 1.5rem; }
-    .rc-hero p { margin: 6px 0 0; opacity: 0.9; font-size: 0.9rem; }
+    .rc-hero p { margin: 6px 0 0; opacity: 0.72; font-size: 0.9rem; }
     .rc-login {
         max-width: 400px;
         margin: 60px auto;
         padding: 36px 32px;
-        border-radius: 20px;
+        border-radius: 8px;
         background: var(--secondary-background-color);
         border: 1px solid rgba(128,128,128,0.2);
         box-shadow: 0 4px 24px rgba(0,0,0,0.06);
@@ -1437,24 +1178,22 @@ with st.sidebar:
 st.markdown(
     """
     <div class="rc-hero">
-      <h1>👔 채용 관리자 콘솔</h1>
+      <h1>채용 관리자 콘솔</h1>
       <p>면접 결과 확인 · 알림 관리 · 채용 설정</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-if page == "📊 대시보드":
+if page == "대시보드":
     render_dashboard(records)
-elif page == "🧑‍💼 지원자 목록":
+elif page == "지원자 관리":
     render_interviews(records)
-elif page == "📤 알림/파이프라인":
+elif page == "알림/파이프라인":
     render_outbox(records)
-elif page == "🧪 테스트 도구":
+elif page == "테스트 도구":
     render_simulator(records)
-elif page == "⚡ Zapier 연결":
-    render_zapier_guide()
-elif page == "⚙️ 설정":
+elif page == "설정":
     tab_recruit, tab_filter = st.tabs(["채용 기준", "자격 필터"])
     with tab_recruit:
         render_recruiting_settings(config)
